@@ -19,7 +19,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install requests pytz yfinance
 
       - name: Run NSE + Global Cues report
         env:
