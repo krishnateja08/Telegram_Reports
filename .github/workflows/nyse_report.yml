@@ -1,0 +1,29 @@
+name: NYSE Market Report
+
+on:
+  schedule:
+    # 5:00 PM CST (UTC-6) = 23:00 UTC (Mon-Fri)
+    # If CDT (UTC-5) is in effect, use 22:00 UTC instead
+    - cron: "0 23 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  nyse-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run NYSE + Global Cues report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python market_news_bot.py --market nyse
