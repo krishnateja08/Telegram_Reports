@@ -1,0 +1,28 @@
+name: NSE Market Report
+
+on:
+  schedule:
+    # 4:00 PM IST = 10:30 UTC (Mon-Fri)
+    - cron: "30 10 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  nse-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run NSE + Global Cues report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python market_news_bot.py --market nse
