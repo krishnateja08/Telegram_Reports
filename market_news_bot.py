@@ -195,7 +195,10 @@ def get_global_cues() -> list:
 
 def get_gainers_losers(symbols: list) -> tuple:
     movers = []
+    seen_syms: set = set()  # FIX #1 — deduplicate tickers before sorting
     for sym in symbols:
+        if sym in seen_syms:
+            continue
         try:
             hist = yf.Ticker(sym).history(period="2d")
             if len(hist) < 2:
@@ -206,6 +209,7 @@ def get_gainers_losers(symbols: list) -> tuple:
             info  = yf.Ticker(sym).info
             name  = info.get("shortName") or sym
             movers.append({"name": name, "symbol": sym, "pct": pct})
+            seen_syms.add(sym)
         except Exception:
             pass
     movers.sort(key=lambda x: x.get("pct", 0), reverse=True)
@@ -795,7 +799,16 @@ def fmt_volume_spikes(spikes: list) -> list:
     if not spikes:
         return []
     lines = ["*📡 UNUSUAL VOLUME*"]
+
+    # FIX #1 — Deduplicate: same ticker can appear multiple times if it triggers
+    # multiple signals. Keep the entry with the highest vol_x per symbol.
+    seen: dict = {}
     for s in spikes:
+        sym = s["symbol"]
+        if sym not in seen or s["vol_x"] > seen[sym]["vol_x"]:
+            seen[sym] = s
+
+    for s in seen.values():
         sign  = "+" if s["pct"] >= 0 else ""
         a     = arrow(s["pct"])
         name  = esc(s["name"])
@@ -861,9 +874,13 @@ def build_message(
     lines = []
 
     # ── Header ────────────────────────────────────────────────────────────────
+    # FIX #3 — Clear NSE vs NYSE differentiation with flag + relevant timezone only
+    flag     = "🇮🇳" if is_nse else "🇺🇸"
+    time_str = ist_str if is_nse else est_str
+    tz_label = esc("IST") if is_nse else esc("EST")
     lines += [
-        f"📊 *{esc(market)} Market Summary*",
-        f"🗓 {today}  \\|  🕐 {ist_str} \\| {est_str}",
+        f"{flag} *{esc(market)} Market Summary*",
+        f"🗓 {today}  \\|  🕐 {tz_label}: {time_str}",
         "",
     ]
 
@@ -1038,6 +1055,37 @@ def send_telegram(token: str, chat_id: str, text: str) -> bool:
     return resp.ok
 
 
+def send_telegram_safe(token: str, chat_id: str, text: str) -> bool:
+    """
+    FIX #2 — Avoid cut-off messages.
+    Telegram's hard limit is 4096 chars per message.
+    Split long messages at clean line boundaries so no word/sentence is ever cut mid-way.
+    """
+    MAX_LEN = 4000  # comfortable buffer below 4096
+    if len(text) <= MAX_LEN:
+        return send_telegram(token, chat_id, text)
+
+    lines   = text.split("\n")
+    chunk   = ""
+    success = True
+
+    for line in lines:
+        # +1 accounts for the newline we'll re-add
+        if len(chunk) + len(line) + 1 > MAX_LEN:
+            if chunk.strip():
+                ok = send_telegram(token, chat_id, chunk.rstrip())
+                success = success and ok
+            chunk = line + "\n"
+        else:
+            chunk += line + "\n"
+
+    if chunk.strip():
+        ok = send_telegram(token, chat_id, chunk.rstrip())
+        success = success and ok
+
+    return success
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def run(config: dict, market: str = "both"):
@@ -1053,9 +1101,11 @@ def run(config: dict, market: str = "both"):
     global_pulse = get_global_pulse()
 
     if global_cues or global_pulse:
-        ok = send_telegram(token, chat_id, build_global_cues_message(global_cues))
+        ok = send_telegram_safe(token, chat_id, build_global_cues_message(global_cues))
         print(f"  Global Cues Telegram: {'sent ✓' if ok else 'FAILED ✗'}")
 
+    # FIX #3 — Always process NSE before NYSE so messages arrive in the right order.
+    # Global cues (pre-market context) are injected ONLY into the NSE message.
     markets = []
     if market in ("nse", "both"):
         markets.append(("NSE India", NSE_TICKERS, NSE_SECTORS, TOP_NSE_STOCKS, NSE_FEEDS, "india"))
@@ -1064,12 +1114,12 @@ def run(config: dict, market: str = "both"):
 
     for label, idx_tickers, sec_tickers, stock_list, feeds, region in markets:
         print(f"Fetching data for {label} ...")
+        is_nse          = "NSE" in label
         idx_data        = get_index_data(idx_tickers)
         sector_rows     = get_sector_data(sec_tickers)
         gainers, losers = get_gainers_losers(stock_list)
         headlines       = get_headlines(feeds, region=region)
 
-        is_nse           = "NSE" in label
         vol_spikes       = get_volume_spikes(stock_list)
         fii_dii_lines    = get_specialist_headlines("fii_dii")     if is_nse else []
         bulk_block_lines = get_specialist_headlines("bulk_block")   if is_nse else []
@@ -1082,13 +1132,18 @@ def run(config: dict, market: str = "both"):
         print(f"  Vol spikes: {len(vol_spikes)} | FII/DII: {len(fii_dii_lines)} | "
               f"IPO: {len(ipo_lines)} | Earnings: {len(earn_lines)}")
 
+        # FIX #3 — Global cues only go into the NSE message (pre-market context for India).
+        # NYSE message gets clean US-only content with no Indian pre-market data.
+        msg_global_cues  = global_cues  if is_nse else []
+        msg_global_pulse = global_pulse if is_nse else []
+
         msg = build_message(
             label, idx_data, sector_rows,
             gainers, losers,
             headlines, vix_val, india_vix_val,
             idx_tickers,
-            global_cues       = global_cues,
-            global_pulse      = global_pulse,
+            global_cues       = msg_global_cues,
+            global_pulse      = msg_global_pulse,
             vol_spikes        = vol_spikes,
             fii_dii_lines     = fii_dii_lines,
             bulk_block_lines  = bulk_block_lines,
@@ -1098,8 +1153,9 @@ def run(config: dict, market: str = "both"):
             regulatory_lines  = reg_lines,
             earnings_lines    = earn_lines,
         )
-        ok = send_telegram(token, chat_id, msg)
-        print(f"  Telegram: {'sent ✓' if ok else 'FAILED ✗'}")
+        # FIX #2 — Use safe sender that splits messages exceeding Telegram's 4096-char limit
+        ok = send_telegram_safe(token, chat_id, msg)
+        print(f"  Telegram [{label}]: {'sent ✓' if ok else 'FAILED ✗'}")
 
 
 def main():
