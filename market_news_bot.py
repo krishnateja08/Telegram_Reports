@@ -90,6 +90,17 @@ GLOBAL_CUES = {
     "Gold India":   "GOLDBEES.NS", # NSE Gold ETF (INR)
     "Silver India": "SILVERBEES.NS",# NSE Silver ETF (INR)
 }
+# Global Market Pulse — Asia + Europe
+ASIA_EUROPE_CUES = {
+    "Nikkei 225": "^N225",
+    "Hang Seng":  "^HSI",
+    "Shanghai":   "000001.SS",
+    "DAX":        "^GDAXI",
+    "FTSE 100":   "^FTSE",
+    "CAC 40":     "^FCHI",
+    "Nasdaq Fut": "NQ=F",
+    "S&P Fut":    "ES=F",
+}
 TOP_NSE_STOCKS  = [
     "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS",
     "WIPRO.NS","HCLTECH.NS","SBIN.NS","BAJFINANCE.NS","ADANIENT.NS",
@@ -337,6 +348,34 @@ NYSE_FEEDS = [
     "https://feeds.finance.yahoo.com/rss/2.0/headline?s=SPY&region=US&lang=en-US",
     "https://feeds.content.dowjones.io/public/rss/mw_topstories",
 ]
+NSE_SPECIALIST_FEEDS = {
+    "fii_dii":      [
+        "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+        "https://www.moneycontrol.com/rss/fii-dii-activity.xml",
+    ],
+    "bulk_block":   [
+        "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms",
+        "https://www.moneycontrol.com/rss/bulk-deal.xml",
+    ],
+    "insider":      [
+        "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms",
+    ],
+    "ipo":          [
+        "https://economictimes.indiatimes.com/markets/ipos/rssfeeds/3624960.cms",
+        "https://www.chittorgarh.com/rss/ipo.asp",
+    ],
+    "corp_actions": [
+        "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms",
+    ],
+    "earnings":     [
+        "https://economictimes.indiatimes.com/markets/earnings/rssfeeds/2143429.cms",
+        "https://www.moneycontrol.com/rss/results.xml",
+    ],
+    "regulatory":   [
+        "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+        "https://www.moneycontrol.com/rss/marketreports.xml",
+    ],
+}
 
 
 # ─── Analysis helpers ─────────────────────────────────────────────────────────
@@ -396,6 +435,97 @@ def market_status(tz_name: str, open_h: int, open_m: int, close_h: int, close_m:
         return "Closed"
 
 
+
+
+# ─── New category fetchers ────────────────────────────────────────────────────
+
+def get_global_pulse() -> list:
+    """Asia + Europe + US Futures for Global Market Pulse section."""
+    rows = []
+    for name, symbol in ASIA_EUROPE_CUES.items():
+        try:
+            d = get_ticker(symbol)
+            if d and d["close"] and d["close"] > 0:
+                rows.append({"name": name, "close": d["close"], "pct": d["pct"]})
+        except Exception:
+            pass
+    return rows
+
+
+def get_volume_spikes(symbols: list, threshold: float = 2.0) -> list:
+    """Return stocks where today vol > threshold × 20-day average."""
+    spikes = []
+    for sym in symbols:
+        try:
+            hist = yf.Ticker(sym).history(period="25d")
+            if len(hist) < 21:
+                continue
+            avg_vol   = hist["Volume"].iloc[:-1].mean()
+            today_vol = hist["Volume"].iloc[-1]
+            if avg_vol > 0 and today_vol / avg_vol >= threshold:
+                close = hist["Close"].iloc[-1]
+                pct   = hist["Close"].pct_change().iloc[-1] * 100
+                info  = yf.Ticker(sym).info
+                name  = info.get("shortName") or sym
+                spikes.append({
+                    "name":   name,
+                    "symbol": sym,
+                    "close":  close,
+                    "pct":    pct,
+                    "vol_x":  round(today_vol / avg_vol, 1),
+                })
+        except Exception:
+            pass
+    spikes.sort(key=lambda x: x["vol_x"], reverse=True)
+    return spikes[:5]
+
+
+def get_sector_buzz(sector_rows: list, top_n: int = 2) -> dict:
+    """Top N bullish and bearish sectors from already-fetched sector data."""
+    sorted_s = sorted(sector_rows, key=lambda x: x.get("pct", 0), reverse=True)
+    return {
+        "bullish": sorted_s[:top_n],
+        "bearish": sorted_s[-top_n:][::-1],
+    }
+
+
+def get_specialist_headlines(category: str, max_items: int = 5,
+                              region: str | None = None) -> list:
+    """Fetch specialist headlines for a named category."""
+    feeds = NSE_SPECIALIST_FEEDS.get(category, [])
+    kw_map = {
+        "fii_dii":      ["fii", "dii", "foreign institutional", "domestic institutional",
+                         "net buy", "net sell", "flows"],
+        "bulk_block":   ["bulk deal", "block deal", "bulk", "block", "institution"],
+        "insider":      ["promoter", "insider", "director", "management", "bought", "sold"],
+        "ipo":          ["ipo", "gmp", "subscription", "listing", "grey market", "allotment"],
+        "corp_actions": ["bonus", "split", "buyback", "dividend", "rights issue", "record date"],
+        "earnings":     ["earnings", "profit", "revenue", "results", "q1", "q2", "q3", "q4",
+                         "beat", "miss", "guidance", "ebitda", "pat"],
+        "regulatory":   ["sebi", "rbi", "fed", "opec", "circular", "guideline", "regulation",
+                         "penalty", "notice", "norms"],
+    }
+    keywords = kw_map.get(category, [])
+    seen, result = set(), []
+    for feed in feeds:
+        for h in fetch_headlines(feed, max_items=30):
+            h_low = h.lower()
+            if h not in seen and any(kw in h_low for kw in keywords) and len(result) < max_items:
+                seen.add(h)
+                result.append(h)
+    return result
+
+
+def tag_earnings_headline(h: str) -> str:
+    h_low = h.lower()
+    if any(w in h_low for w in ["beat", "above estimate", "beats"]):
+        return "✅ Beat"
+    if any(w in h_low for w in ["miss", "below estimate", "misses", "disappoints"]):
+        return "❌ Miss"
+    if any(w in h_low for w in ["guidance", "outlook", "forecast", "projects"]):
+        return "🔮 Guidance"
+    return "📋 Result"
+
 def arrow(pct: float) -> str:
     return "🟢" if pct >= 0 else "🔴"
 
@@ -406,6 +536,273 @@ def sector_dot(pct: float) -> str:
     elif pct < -0.2:
         return "🔴"
     return "🟡"
+
+
+# ─── News formatting helpers ──────────────────────────────────────────────────
+
+# Maps keyword → (emoji, label) context tag
+_CONTEXT_TAG_MAP = [
+    # Regulation / legal
+    (["sebi", "sec ", "regulation", "norms", "compliance", "penalty", "case"],        "⚖️ Regulation"),
+    # Macro / central bank
+    (["rbi", "fed", "rate", "inflation", "gdp", "budget", "fiscal", "repo"],          "🏦 Macro"),
+    # FX / currency
+    (["rupee", "dollar", "usdinr", "forex", "fx", "currency"],                        "💵 FX"),
+    # Commodities
+    (["crude", "oil", "gold", "silver", "commodity", "commodities"],                  "🛢 Commodity"),
+    # Real estate / infra
+    (["property", "real estate", "infra", "hotel", "housing", "realty", "reit"],      "🏗️ Real estate"),
+    # IPO / listing
+    (["ipo", "listing", "unlisted", "pre-ipo"],                                        "📋 IPO"),
+    # Earnings / results
+    (["earnings", "profit", "revenue", "results", "quarterly", "q1","q2","q3","q4"],  "📊 Earnings"),
+    # Key events / AGM
+    (["agm", "concall", "investor day", "merger", "acquisition", "stake"],             "🔍 Key event"),
+    # Geopolitics
+    (["iran", "china", "russia", "war", "sanctions", "israel", "deal", "geo"],        "🌍 Geo"),
+    # Tech / AI
+    (["ai", "chip", "cloud", "software", "nvidia", "openai", "cyber", "tech"],        "💡 Tech"),
+    # Banking / financial sector
+    (["bank", "banks", "nbfc", "npa", "credit", "loan", "deposit"],                   "🏦 Banking"),
+    # Manufacturing / industrial
+    (["auto", "ev", "electrical", "machinery", "manufacturing", "plant"],              "🏭 Industry"),
+    # Stocks / picks
+    (["stock ideas", "buy", "target price", "analyst", "picks", "watchlist"],          "📌 Stocks"),
+    # Quote / wisdom
+    (["quote", "said", "says", '"', "—"],                                              "💬 Quote"),
+]
+
+_CAT_DEFAULT_TAG = {
+    "Macro":       "🏦 Macro",
+    "Earnings":    "💰 Earnings",
+    "Tech/AI":     "💡 Tech",
+    "Geopolitics": "🌍 Geo",
+    "Market":      "📌 Markets",
+}
+
+_CAT_HEADER = {
+    "Tech/AI":     "🧠 *TECH \\& AI*",
+    "Macro":       "📊 *MACRO*",
+    "Earnings":    "💰 *EARNINGS*",
+    "Geopolitics": "🌍 *GEOPOLITICS*",
+    "Market":      "📈 *MARKET*",
+}
+
+
+def get_context_tag(headline: str, category: str) -> str:
+    """Return a short emoji context tag for a headline."""
+    h = headline.lower()
+    for keywords, tag in _CONTEXT_TAG_MAP:
+        if any(kw in h for kw in keywords):
+            return tag
+    return _CAT_DEFAULT_TAG.get(category, "📌 Markets")
+
+
+def format_news_section(categorized: dict) -> list:
+    """
+    Build punchy, trader-friendly news lines:
+      🧠 *TECH & AI*
+      • Headline text  | 🔍 Key event
+    """
+    lines = []
+    # Preferred display order
+    order = ["Tech/AI", "Macro", "Market", "Earnings", "Geopolitics"]
+    sorted_cats = [c for c in order if c in categorized] + \
+                  [c for c in categorized if c not in order]
+
+    for cat in sorted_cats:
+        items = categorized[cat]
+        header = _CAT_HEADER.get(cat, f"📌 *{esc(cat.upper())}*")
+        lines.append(header)
+        for h in items:
+            tag  = get_context_tag(h, cat)
+            lines.append(f"• {esc(h)}  \\|  {esc(tag)}")
+        lines.append("")
+    return lines
+
+
+def build_sentiment_summary(categorized: dict, avg_pct: float, vix: float | None) -> list:
+    """Optional per-section sentiment tags."""
+    lines = ["*📡 Section Sentiment*"]
+    base = sentiment_bar(vix, avg_pct)
+    for cat in categorized:
+        # Simple heuristic: inherit market mood; could be refined per category
+        lines.append(f"  {_CAT_DEFAULT_TAG.get(cat, cat)}: {base}")
+    lines.append("")
+    return lines
+
+
+
+# ─── New section formatters ──────────────────────────────────────────────────
+
+def fmt_premarket_cues(global_cues: list, global_pulse: list) -> list:
+    """Pre-market cues block: SGX Nifty, Dow Fut, Crude, USD."""
+    if not global_cues:
+        return []
+    priority = {"SGX Nifty", "Dow Futures", "Crude Oil", "USDINR", "US 10Y"}
+    lines = ["*🌅 PRE\\-MARKET CUES*"]
+    for g in global_cues:
+        if g["name"] in priority:
+            a    = arrow(g["pct"])
+            sign = "+" if g["pct"] >= 0 else ""
+            paren_open  = "\\("
+            paren_close = "\\)"
+            close_fmt = esc(f"{g['close']:,.2f}")
+            pct_fmt   = esc(f"{sign}{g['pct']:.2f}%")
+            lines.append(
+                f"{a} *{esc(g['name'])}:* {close_fmt} "
+                f"{paren_open}{pct_fmt}{paren_close}"
+            )
+    lines.append("")
+    return lines
+
+
+def fmt_global_pulse(global_pulse: list) -> list:
+    """Global market pulse: Asia, Europe, US futures."""
+    if not global_pulse:
+        return []
+    lines = ["*🌍 GLOBAL MARKET PULSE*"]
+    groups = [
+        ("🌏 Asia",    ["Nikkei 225", "Hang Seng", "Shanghai"]),
+        ("🌍 Europe",  ["DAX", "FTSE 100", "CAC 40"]),
+        ("🇺🇸 US Fut", ["Nasdaq Fut", "S&P Fut"]),
+    ]
+    pm = {g["name"]: g for g in global_pulse}
+    for label, names in groups:
+        parts = []
+        for n in names:
+            if n in pm:
+                g    = pm[n]
+                sign = "+" if g["pct"] >= 0 else ""
+                dot  = "🟢" if g["pct"] >= 0 else "🔴"
+                parts.append(f"{dot} {esc(n.split()[0])}: {esc(f'{sign}{g["pct"]:.1f}%')}")
+        if parts:
+            lines.append(f"{esc(label)}: {'  '.join(parts)}")
+    lines.append("")
+    return lines
+
+
+def fmt_sector_buzz(buzz: dict) -> list:
+    """Sector buzz: top strong and weak sectors."""
+    if not buzz.get("bullish") and not buzz.get("bearish"):
+        return []
+    lines = ["*🌡 SECTOR BUZZ*"]
+    sep = "\\|"
+    for s in buzz.get("bullish", []):
+        sign = "+" if s["pct"] >= 0 else ""
+        pct_s = esc(f"{sign}{s['pct']:.1f}%")
+        lines.append(f"🟢 *{esc(s['name'])}*: {pct_s}  {sep}  🔥 Strong")
+    for s in buzz.get("bearish", []):
+        sign = "+" if s["pct"] >= 0 else ""
+        pct_s = esc(f"{sign}{s['pct']:.1f}%")
+        lines.append(f"🔴 *{esc(s['name'])}*: {pct_s}  {sep}  🧊 Weak")
+    lines.append("")
+    return lines
+
+
+def fmt_fii_dii(headlines: list) -> list:
+    if not headlines:
+        return []
+    lines = ["*💸 FII \\/ DII FLOWS*"]
+    for h in headlines:
+        lines.append(f"• {esc(h)}")
+    lines.append("")
+    return lines
+
+
+def fmt_bulk_block_deals(headlines: list) -> list:
+    if not headlines:
+        return []
+    lines = ["*🏦 BULK \\& BLOCK DEALS*"]
+    for h in headlines:
+        lines.append(f"• {esc(h)}")
+    lines.append("")
+    return lines
+
+
+def fmt_insider_activity(headlines: list) -> list:
+    if not headlines:
+        return []
+    lines = ["*👔 INSIDER ACTIVITY*"]
+    for h in headlines:
+        h_low = h.lower()
+        tag = "🟢 Buy"  if any(w in h_low for w in ["bought","buy","purchase","acquired"]) else               "🔴 Sell" if any(w in h_low for w in ["sold","sell","offload","stake sale"])  else "📋"
+        lines.append(f"{tag}  {esc(h)}")
+    lines.append("")
+    return lines
+
+
+def fmt_ipo(headlines: list) -> list:
+    if not headlines:
+        return []
+    lines = ["*📋 IPO \\/ LISTING UPDATES*"]
+    for h in headlines:
+        h_low = h.lower()
+        tag = "🚀 Listing" if "listing" in h_low else               "📊 GMP"     if "gmp"     in h_low else               "📝 Sub"     if "subscri" in h_low else "📌"
+        lines.append(f"{tag}  {esc(h)}")
+    lines.append("")
+    return lines
+
+
+def fmt_corp_actions(headlines: list) -> list:
+    if not headlines:
+        return []
+    lines = ["*🎁 CORPORATE ACTIONS*"]
+    tag_map = {
+        "bonus":    "🎁 Bonus",
+        "split":    "✂️ Split",
+        "buyback":  "🔄 Buyback",
+        "dividend": "💵 Dividend",
+        "rights":   "📋 Rights",
+    }
+    for h in headlines:
+        h_low = h.lower()
+        tag = next((v for k, v in tag_map.items() if k in h_low), "📌")
+        lines.append(f"{tag}  {esc(h)}")
+    lines.append("")
+    return lines
+
+
+def fmt_regulatory_alerts(headlines: list) -> list:
+    if not headlines:
+        return []
+    lines = ["*⚖️ REGULATORY ALERTS*"]
+    body_map = [
+        ("sebi", "🇮🇳 SEBI"), ("rbi", "🇮🇳 RBI"),
+        ("fed",  "🇺🇸 Fed"),  ("opec","🛢 OPEC"), ("sec ","🇺🇸 SEC"),
+    ]
+    for h in headlines:
+        h_low = h.lower()
+        body = next((v for k, v in body_map if k in h_low), "📌")
+        lines.append(f"{body}  {esc(h)}")
+    lines.append("")
+    return lines
+
+
+def fmt_earnings_snapshot(headlines: list) -> list:
+    if not headlines:
+        return []
+    lines = ["*💰 EARNINGS SNAPSHOT*"]
+    for h in headlines:
+        tag = tag_earnings_headline(h)
+        lines.append(f"{tag}  {esc(h)}")
+    lines.append("")
+    return lines
+
+
+def fmt_volume_spikes(spikes: list) -> list:
+    if not spikes:
+        return []
+    lines = ["*📡 UNUSUAL VOLUME*"]
+    for s in spikes:
+        sign  = "+" if s["pct"] >= 0 else ""
+        a     = arrow(s["pct"])
+        name  = esc(s["name"])
+        pct   = esc(f"{sign}{s['pct']:.2f}%")
+        vol_x = esc(f"{s['vol_x']}×")
+        lines.append(f"{a} *{name}*: {pct}  \\|  Vol: {vol_x} avg")
+    lines.append("")
+    return lines
 
 
 # ─── Message builder ─────────────────────────────────────────────────────────
@@ -420,7 +817,27 @@ def build_message(
     vix_val: float | None,
     india_vix_val: float | None,
     idx_tickers: dict,
+    global_cues: list | None = None,
+    global_pulse: list | None = None,
+    vol_spikes: list | None = None,
+    fii_dii_lines: list | None = None,
+    bulk_block_lines: list | None = None,
+    insider_lines: list | None = None,
+    ipo_lines: list | None = None,
+    corp_action_lines: list | None = None,
+    regulatory_lines: list | None = None,
+    earnings_lines: list | None = None,
 ) -> str:
+    global_cues        = global_cues        or []
+    global_pulse       = global_pulse       or []
+    vol_spikes         = vol_spikes         or []
+    fii_dii_lines      = fii_dii_lines      or []
+    bulk_block_lines   = bulk_block_lines   or []
+    insider_lines      = insider_lines      or []
+    ipo_lines          = ipo_lines          or []
+    corp_action_lines  = corp_action_lines  or []
+    regulatory_lines   = regulatory_lines   or []
+    earnings_lines     = earnings_lines     or []
     today = esc(datetime.date.today().strftime("%d %b %Y"))
     is_nse = "NSE" in market
 
@@ -448,6 +865,12 @@ def build_message(
         f"🗓 {today}  \\|  🕐 {ist_str} \\| {est_str}",
         "",
     ]
+
+    # ── Pre-Market Cues ──────────────────────────────────────────────────────────
+    lines += fmt_premarket_cues(global_cues, global_pulse)
+
+    # ── Global Market Pulse ───────────────────────────────────────────────────────
+    lines += fmt_global_pulse(global_pulse)
 
     # ── Market status ─────────────────────────────────────────────────────────
     lines += [
@@ -506,6 +929,11 @@ def build_message(
             lines.append(f"{dot} {sname}: {spct}  \\|  RSI: {rsi_str} {tag}")
         lines.append("")
 
+    # ── Sector Buzz ──────────────────────────────────────────────────────────────
+    if sector_rows:
+        buzz = get_sector_buzz(sector_rows)
+        lines += fmt_sector_buzz(buzz)
+
     # ── Gainers & Losers ──────────────────────────────────────────────────────
     if gainers:
         lines.append("*🚀 Top Gainers*")
@@ -524,6 +952,30 @@ def build_message(
             lines.append(f"🔴 {lname} \\({lsym}\\): {lpct}")
         lines.append("")
 
+    # ── Unusual Volume ───────────────────────────────────────────────────────────
+    lines += fmt_volume_spikes(vol_spikes)
+
+    # ── FII / DII Flows ───────────────────────────────────────────────────────────
+    lines += fmt_fii_dii(fii_dii_lines)
+
+    # ── Bulk & Block Deals ────────────────────────────────────────────────────────
+    lines += fmt_bulk_block_deals(bulk_block_lines)
+
+    # ── Insider Activity ──────────────────────────────────────────────────────────
+    lines += fmt_insider_activity(insider_lines)
+
+    # ── IPO / Listing ─────────────────────────────────────────────────────────────
+    lines += fmt_ipo(ipo_lines)
+
+    # ── Corporate Actions ─────────────────────────────────────────────────────────
+    lines += fmt_corp_actions(corp_action_lines)
+
+    # ── Regulatory Alerts ─────────────────────────────────────────────────────────
+    lines += fmt_regulatory_alerts(regulatory_lines)
+
+    # ── Earnings Snapshot ─────────────────────────────────────────────────────────
+    lines += fmt_earnings_snapshot(earnings_lines)
+
     # ── News by Category ──────────────────────────────────────────────────────
     if headlines:
         categorized: dict = {}
@@ -531,15 +983,18 @@ def build_message(
             cat = categorize_headline(h)
             categorized.setdefault(cat, []).append(h)
 
-        lines.append("*📰 Top Headlines*")
-        cat_icons = {"Macro": "🏦", "Earnings": "💰", "Tech/AI": "🤖",
-                     "Geopolitics": "🌐", "Market": "📌"}
-        for cat, items in categorized.items():
-            icon = cat_icons.get(cat, "📌")
-            lines.append(f"_{esc(icon + ' ' + cat)}_")
-            for h in items:
-                lines.append(f"  • {esc(h)}")
-        lines.append("")
+        # Header + timestamp block
+        lines += [
+            "*📰 TOP HEADLINES*",
+            f"🕒 Updated: {ist_str}",
+            "",
+        ]
+
+        # Per-section sentiment summary (remove block to disable)
+        lines += build_sentiment_summary(categorized, avg_pct, active_vix)
+
+        # Punchy categorised news with context tags
+        lines += format_news_section(categorized)
 
     lines.append(esc("━" * 22))
     return "\n".join(lines)
@@ -593,8 +1048,10 @@ def run(config: dict, market: str = "both"):
     india_vix_val = get_vix_level(INDIA_VIX)
 
     print("Fetching global cues ...")
-    global_cues = get_global_cues()
-    if global_cues:
+    global_cues  = get_global_cues()
+    global_pulse = get_global_pulse()
+
+    if global_cues or global_pulse:
         ok = send_telegram(token, chat_id, build_global_cues_message(global_cues))
         print(f"  Global Cues Telegram: {'sent ✓' if ok else 'FAILED ✗'}")
 
@@ -606,16 +1063,39 @@ def run(config: dict, market: str = "both"):
 
     for label, idx_tickers, sec_tickers, stock_list, feeds, region in markets:
         print(f"Fetching data for {label} ...")
-        idx_data     = get_index_data(idx_tickers)
-        sector_rows  = get_sector_data(sec_tickers)
+        idx_data        = get_index_data(idx_tickers)
+        sector_rows     = get_sector_data(sec_tickers)
         gainers, losers = get_gainers_losers(stock_list)
-        headlines    = get_headlines(feeds, region=region)
+        headlines       = get_headlines(feeds, region=region)
+
+        is_nse           = "NSE" in label
+        vol_spikes       = get_volume_spikes(stock_list)
+        fii_dii_lines    = get_specialist_headlines("fii_dii")     if is_nse else []
+        bulk_block_lines = get_specialist_headlines("bulk_block")   if is_nse else []
+        insider_lines    = get_specialist_headlines("insider")      if is_nse else []
+        ipo_lines        = get_specialist_headlines("ipo")          if is_nse else []
+        corp_lines       = get_specialist_headlines("corp_actions") if is_nse else []
+        reg_lines        = get_specialist_headlines("regulatory")
+        earn_lines       = get_specialist_headlines("earnings")
+
+        print(f"  Vol spikes: {len(vol_spikes)} | FII/DII: {len(fii_dii_lines)} | "
+              f"IPO: {len(ipo_lines)} | Earnings: {len(earn_lines)}")
 
         msg = build_message(
             label, idx_data, sector_rows,
             gainers, losers,
             headlines, vix_val, india_vix_val,
             idx_tickers,
+            global_cues       = global_cues,
+            global_pulse      = global_pulse,
+            vol_spikes        = vol_spikes,
+            fii_dii_lines     = fii_dii_lines,
+            bulk_block_lines  = bulk_block_lines,
+            insider_lines     = insider_lines,
+            ipo_lines         = ipo_lines,
+            corp_action_lines = corp_lines,
+            regulatory_lines  = reg_lines,
+            earnings_lines    = earn_lines,
         )
         ok = send_telegram(token, chat_id, msg)
         print(f"  Telegram: {'sent ✓' if ok else 'FAILED ✗'}")
