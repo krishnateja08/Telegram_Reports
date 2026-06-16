@@ -675,7 +675,8 @@ def fmt_global_pulse(global_pulse: list) -> list:
                 g    = pm[n]
                 sign = "+" if g["pct"] >= 0 else ""
                 dot  = "🟢" if g["pct"] >= 0 else "🔴"
-                parts.append(f"{dot} {esc(n.split()[0])}: {esc(f'{sign}{g["pct"]:.1f}%')}")
+                pct_str = f'{sign}{g["pct"]:.1f}%'
+                parts.append(f"{dot} {esc(n.split()[0])}: {esc(pct_str)}")
         if parts:
             lines.append(f"{esc(label)}: {'  '.join(parts)}")
     lines.append("")
