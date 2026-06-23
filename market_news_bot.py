@@ -171,13 +171,43 @@ def rsi_tag(rsi: float | None) -> str:
     return ""
 
 
+def get_sector_5d_pct(symbol: str) -> float | None:
+    """Return 5-trading-day percentage change for a sector."""
+    try:
+        hist = yf.Ticker(symbol).history(period="7d")
+        closes = list(hist["Close"])
+        if len(closes) < 2:
+            return None
+        return (closes[-1] - closes[0]) / closes[0] * 100
+    except Exception:
+        return None
+
+
+def sector_strength_score(pct_1d: float, pct_5d: float | None, rsi: float | None) -> int:
+    """
+    Simple 0-100 composite strength score.
+    40% weight on 1-day move, 40% on 5-day trend, 20% on RSI proximity to 50.
+    Returns integer 0-100.
+    """
+    score = 50.0  # neutral baseline
+    score += pct_1d * 4          # ±1% daily = ±4 pts
+    if pct_5d is not None:
+        score += pct_5d * 2      # ±1% weekly = ±2 pts
+    if rsi is not None:
+        score += (rsi - 50) * 0.2  # RSI 70 → +4, RSI 30 → -4
+    return max(0, min(100, round(score)))
+
+
 def get_sector_data(sectors: dict) -> list:
     rows = []
     for name, symbol in sectors.items():
         d = get_ticker(symbol)
         if d:
-            rsi = calc_rsi(symbol)
-            rows.append({"name": name, "pct": d["pct"], "rsi": rsi})
+            rsi    = calc_rsi(symbol)
+            pct_5d = get_sector_5d_pct(symbol)
+            score  = sector_strength_score(d["pct"], pct_5d, rsi)
+            rows.append({"name": name, "pct": d["pct"], "rsi": rsi,
+                         "pct_5d": pct_5d, "score": score})
     return rows
 
 
@@ -200,15 +230,19 @@ def get_gainers_losers(symbols: list) -> tuple:
         if sym in seen_syms:
             continue
         try:
-            hist = yf.Ticker(sym).history(period="2d")
+            hist = yf.Ticker(sym).history(period="25d")
             if len(hist) < 2:
                 continue
-            close = hist["Close"].iloc[-1]
-            prev  = hist["Close"].iloc[-2]
-            pct   = ((close - prev) / prev * 100) if prev else 0
-            info  = yf.Ticker(sym).info
-            name  = info.get("shortName") or sym
-            movers.append({"name": name, "symbol": sym, "pct": pct})
+            close    = hist["Close"].iloc[-1]
+            prev     = hist["Close"].iloc[-2]
+            pct      = ((close - prev) / prev * 100) if prev else 0
+            # Volume vs 20-day average
+            avg_vol  = hist["Volume"].iloc[:-1].mean() if len(hist) > 1 else 0
+            today_vol = hist["Volume"].iloc[-1]
+            vol_x    = round(today_vol / avg_vol, 1) if avg_vol > 0 else None
+            info     = yf.Ticker(sym).info
+            name     = info.get("shortName") or sym
+            movers.append({"name": name, "symbol": sym, "pct": pct, "vol_x": vol_x})
             seen_syms.add(sym)
         except Exception:
             pass
@@ -534,6 +568,84 @@ def arrow(pct: float) -> str:
     return "🟢" if pct >= 0 else "🔴"
 
 
+# ─── Impact scoring ───────────────────────────────────────────────────────────
+
+_HIGH_IMPACT_KW = [
+    "fed", "rbi", "sebi", "rate hike", "rate cut", "emergency", "crash", "halt",
+    "gdp", "inflation", "recession", "default", "collapse", "war", "sanctions",
+    "quarterly results", "earnings beat", "earnings miss", "ipo listing",
+]
+_MEDIUM_IMPACT_KW = [
+    "merger", "acquisition", "stake sale", "buyback", "guidance", "outlook",
+    "crude", "gold", "opec", "tariff", "export", "import", "budget", "fiscal",
+    "fii", "dii", "bulk deal", "block deal", "insider",
+]
+
+
+def news_impact_score(headline: str) -> str:
+    """Return 🔥 High / ⚠️ Medium / 💤 Low impact tag for a headline."""
+    h = headline.lower()
+    if any(kw in h for kw in _HIGH_IMPACT_KW):
+        return "🔥 High"
+    if any(kw in h for kw in _MEDIUM_IMPACT_KW):
+        return "⚠️ Medium"
+    return "💤 Low"
+
+
+# ─── "Why it moved" one-liner ────────────────────────────────────────────────
+
+_MOVE_REASONS: list[tuple[list[str], str]] = [
+    (["result", "earnings", "profit", "pat", "revenue", "q1","q2","q3","q4"], "Earnings catalyst"),
+    (["buy", "target", "upgrade", "outperform", "overweight"],                "Analyst upgrade"),
+    (["sell", "downgrade", "underperform", "underweight", "cut"],             "Analyst downgrade"),
+    (["deal", "merger", "acqui", "stake", "takeover"],                        "M&A activity"),
+    (["ipo", "listing", "allot"],                                              "IPO / listing"),
+    (["fii", "dii", "foreign buy", "institutional buy"],                      "Institutional buying"),
+    (["bonus", "split", "dividend", "buyback"],                                "Corporate action"),
+    (["block deal", "bulk deal"],                                              "Block/Bulk deal"),
+    (["sebi", "rbi", "regulation", "compliance", "norms"],                    "Regulatory news"),
+    (["crude", "oil", "energy", "opec"],                                       "Commodity move"),
+    (["dollar", "rupee", "forex", "currency"],                                 "Currency move"),
+    (["macro", "gdp", "inflation", "rate"],                                    "Macro data"),
+]
+
+
+def why_moved(name: str, symbol: str, pct: float) -> str:
+    """
+    Try to fetch recent news for the ticker and derive a one-line reason.
+    Falls back to price-action language if nothing is found.
+    """
+    try:
+        ticker = yf.Ticker(symbol)
+        news_items = ticker.news or []
+        for item in news_items[:5]:
+            title = (item.get("title") or item.get("content", {}).get("title", "") or "").lower()
+            for keywords, reason in _MOVE_REASONS:
+                if any(kw in title for kw in keywords):
+                    return reason
+    except Exception:
+        pass
+    # Fallback: pure price-action label
+    if abs(pct) >= 5:
+        return "Sharp price move — check news"
+    if pct > 0:
+        return "Broad market strength / momentum"
+    return "Broad market weakness / selling"
+
+
+def trend_tag(pct: float) -> str:
+    """Bullish / Bearish / Reversal label for movers."""
+    if pct >= 3:
+        return "📈 Bullish"
+    if pct <= -3:
+        return "📉 Bearish"
+    if pct >= 1:
+        return "↗️ Mildly Bullish"
+    if pct <= -1:
+        return "↘️ Mildly Bearish"
+    return "↔️ Neutral"
+
+
 def sector_dot(pct: float) -> str:
     if pct > 0.2:
         return "🟢"
@@ -619,8 +731,9 @@ def format_news_section(categorized: dict) -> list:
         header = _CAT_HEADER.get(cat, f"📌 *{esc(cat.upper())}*")
         lines.append(header)
         for h in items:
-            tag  = get_context_tag(h, cat)
-            lines.append(f"• {esc(h)}  \\|  {esc(tag)}")
+            tag    = get_context_tag(h, cat)
+            impact = news_impact_score(h)
+            lines.append(f"• {esc(h)}  \\|  {esc(tag)}  \\|  {esc(impact)}")
         lines.append("")
     return lines
 
@@ -819,6 +932,189 @@ def fmt_volume_spikes(spikes: list) -> list:
     return lines
 
 
+# ─── Actionable Insights builder ─────────────────────────────────────────────
+
+def build_actionable_insights(
+    sector_rows: list,
+    gainers: list,
+    losers: list,
+    avg_pct: float,
+    active_vix: float | None,
+    is_nse: bool,
+) -> list:
+    """
+    Generate 3-5 plain-English trade insights from live data.
+    Each insight is one punchy line that a trader can act on.
+    """
+    insights = []
+
+    # 1. Overall market bias
+    regime = market_regime(avg_pct, active_vix)
+    region = "NSE/India" if is_nse else "US markets"
+    if avg_pct > 0.5:
+        insights.append(f"📈 {region} leaning *bullish* \\({esc(f'+{avg_pct:.1f}%')} avg\\) — momentum favours longs\\.")
+    elif avg_pct < -0.5:
+        insights.append(f"📉 {region} under pressure \\({esc(f'{avg_pct:.1f}%')} avg\\) — stay cautious, tighten stops\\.")
+    else:
+        insights.append(f"↔️ {region} range\\-bound today — wait for a breakout before adding positions\\.")
+
+    # 2. Strongest sector → opportunity
+    if sector_rows:
+        top = max(sector_rows, key=lambda x: x.get("pct", 0))
+        weak = min(sector_rows, key=lambda x: x.get("pct", 0))
+        sign_t = "+" if top["pct"] >= 0 else ""
+        sign_w = "+" if weak["pct"] >= 0 else ""
+        top_pct_str  = esc(f"{sign_t}{top['pct']:.1f}%")
+        weak_pct_str = esc(f"{sign_w}{weak['pct']:.1f}%")
+        insights.append(
+            f"🔥 *{esc(top['name'])}* leading \\({top_pct_str}\\) — "
+            f"consider sector ETF or top stocks in this space\\."
+        )
+        if weak["pct"] < -0.5:
+            insights.append(
+                f"🧊 *{esc(weak['name'])}* weakest \\({weak_pct_str}\\) — "
+                f"avoid fresh longs; watch for reversal signals\\."
+            )
+
+    # 3. VIX-based risk call
+    if active_vix is not None:
+        if active_vix > 25:
+            insights.append(
+                f"⚡ VIX at {esc(f'{active_vix:.1f}')} — elevated fear\\. "
+                f"Reduce position size, prefer hedged plays\\."
+            )
+        elif active_vix < 14:
+            insights.append(
+                f"😴 VIX at {esc(f'{active_vix:.1f}')} — very low volatility\\. "
+                f"Options premium cheap; consider protective puts before events\\."
+            )
+
+    # 4. Top gainer momentum note
+    if gainers:
+        g = gainers[0]
+        reason  = why_moved(g["name"], g["symbol"], g["pct"])
+        g_pct_s = esc(f"+{g['pct']:.1f}%")
+        insights.append(
+            f"🚀 *{esc(g['name'])}* surging {g_pct_s} on *{esc(reason)}* — "
+            f"momentum trade valid above today's open\\."
+        )
+
+    # 5. Top loser caution note
+    if losers:
+        l = losers[0]
+        reason  = why_moved(l["name"], l["symbol"], l["pct"])
+        l_pct_s = esc(f"{l['pct']:.1f}%")
+        insights.append(
+            f"⚠️ *{esc(l['name'])}* down {l_pct_s} \\({esc(reason)}\\) — "
+            f"avoid catching the falling knife; wait for stabilisation\\."
+        )
+
+    if not insights:
+        return []
+    lines = ["*💡 ACTIONABLE INSIGHTS*"]
+    for i, ins in enumerate(insights, 1):
+        lines.append(f"{i}\\. {ins}")
+    lines.append("")
+    return lines
+
+
+# ─── Alerts & Risks builder ──────────────────────────────────────────────────
+
+def build_alerts_risks(
+    regulatory_lines: list,
+    earnings_lines: list,
+    active_vix: float | None,
+    is_nse: bool,
+) -> list:
+    """Compact Alerts & Risks block: regulatory, earnings calendar, VIX warning."""
+    lines = ["*🚨 ALERTS \\& RISKS*"]
+    added = 0
+
+    # VIX extreme alert
+    if active_vix is not None and active_vix > 22:
+        lines.append(f"⚡ VIX Alert: {esc(f'{active_vix:.1f}')} — high volatility regime\\. Risk management critical\\.")
+        added += 1
+
+    # Today's regulatory alerts (top 2)
+    for h in regulatory_lines[:2]:
+        lines.append(f"⚖️ {esc(h)}")
+        added += 1
+
+    # Upcoming earnings (top 3)
+    if earnings_lines:
+        lines.append("📅 *Earnings on radar:*")
+        for h in earnings_lines[:3]:
+            tag = tag_earnings_headline(h)
+            lines.append(f"  {tag}  {esc(h)}")
+        added += 1
+
+    # Generic macro risk reminder
+    if is_nse:
+        lines.append("🇮🇳 Watch: RBI policy calendar, SEBI circulars, F&O expiry dates\\.")
+    else:
+        lines.append("🇺🇸 Watch: Fed meeting schedule, CPI/PPI dates, earnings season\\.")
+    added += 1
+
+    if added == 0:
+        return []
+    lines.append("")
+    return lines
+
+
+# ─── One-line market snapshot ─────────────────────────────────────────────────
+
+def build_one_liner(
+    avg_pct: float,
+    active_vix: float | None,
+    global_cues: list,
+    sector_rows: list,
+    is_nse: bool,
+) -> list:
+    """
+    Single-line market snapshot: global cues + VIX mood + expected open bias.
+    Example: "Global cues flat, US tech weak, India VIX low — expect range-bound open."
+    """
+    parts = []
+
+    # Global cue flavour
+    cue_names = {g["name"]: g["pct"] for g in global_cues}
+    if is_nse:
+        sgx = cue_names.get("SGX Nifty")
+        if sgx is not None:
+            parts.append(f"SGX Nifty {'positive' if sgx >= 0 else 'negative'}")
+        dow = cue_names.get("Dow Futures")
+        if dow is not None:
+            parts.append(f"Dow Fut {'up' if dow >= 0 else 'down'}")
+    else:
+        sp = cue_names.get("S&P Fut") or avg_pct
+        parts.append(f"S&P Fut {'positive' if sp >= 0 else 'negative'}")
+
+    # VIX flavour
+    if active_vix is not None:
+        if active_vix < 15:
+            parts.append("VIX low")
+        elif active_vix > 25:
+            parts.append("VIX elevated")
+        else:
+            parts.append("VIX moderate")
+
+    # Sector bias
+    if sector_rows:
+        top = max(sector_rows, key=lambda x: x.get("pct", 0))
+        parts.append(f"{top['name']} leading")
+
+    # Open bias
+    if avg_pct > 0.5:
+        bias = "expect bullish open"
+    elif avg_pct < -0.5:
+        bias = "expect cautious open"
+    else:
+        bias = "expect range-bound open"
+
+    snapshot = ", ".join(parts) + f" — {bias}\\."
+    return [f"_{esc(snapshot)}_", ""]
+
+
 # ─── Message builder ─────────────────────────────────────────────────────────
 
 def build_message(
@@ -842,178 +1138,281 @@ def build_message(
     regulatory_lines: list | None = None,
     earnings_lines: list | None = None,
 ) -> str:
-    global_cues        = global_cues        or []
-    global_pulse       = global_pulse       or []
-    vol_spikes         = vol_spikes         or []
-    fii_dii_lines      = fii_dii_lines      or []
-    bulk_block_lines   = bulk_block_lines   or []
-    insider_lines      = insider_lines      or []
-    ipo_lines          = ipo_lines          or []
-    corp_action_lines  = corp_action_lines  or []
-    regulatory_lines   = regulatory_lines   or []
-    earnings_lines     = earnings_lines     or []
-    today = esc(datetime.date.today().strftime("%d %b %Y"))
+    global_cues       = global_cues       or []
+    global_pulse      = global_pulse      or []
+    regulatory_lines  = regulatory_lines  or []
+    earnings_lines    = earnings_lines    or []
+    fii_dii_lines     = fii_dii_lines     or []
+    ipo_lines         = ipo_lines         or []
+    corp_action_lines = corp_action_lines or []
+    bulk_block_lines  = bulk_block_lines  or []
+    insider_lines     = insider_lines     or []
+    vol_spikes        = vol_spikes        or []
+
     is_nse = "NSE" in market
 
-    # Avg index pct (excluding VIX)
-    pcts = [r["pct"] for r in index_rows if "pct" in r and r["name"] != "VIX"]
+    # ── Core computed values ──────────────────────────────────────────────────
+    pcts    = [r["pct"] for r in index_rows if "pct" in r and r["name"] != "VIX"]
     avg_pct = sum(pcts) / len(pcts) if pcts else 0
-
-    # VIX for this market
     active_vix = india_vix_val if is_nse else vix_val
 
-    # Time zones
-    ist = datetime.datetime.now(pytz.timezone("Asia/Kolkata"))
-    est = datetime.datetime.now(pytz.timezone("America/New_York"))
-    ist_str = esc(ist.strftime("%I:%M %p IST"))
-    est_str = esc(est.strftime("%I:%M %p EST"))
+    now_ist = datetime.datetime.now(pytz.timezone("Asia/Kolkata"))
+    now_est = datetime.datetime.now(pytz.timezone("America/New_York"))
+    now_local = now_ist if is_nse else now_est
+    date_str = now_local.strftime("%-d %b")
+    time_str = now_local.strftime("%-I:%M %p")
 
-    nse_status  = market_status("Asia/Kolkata",     9, 15, 15, 30)
-    nyse_status = market_status("America/New_York", 9, 30, 16,  0)
-
-    lines = []
-
-    # ── Header ────────────────────────────────────────────────────────────────
-    # FIX #3 — Clear NSE vs NYSE differentiation with flag + relevant timezone only
-    flag     = "🇮🇳" if is_nse else "🇺🇸"
-    time_str = ist_str if is_nse else est_str
-    tz_label = esc("IST") if is_nse else esc("EST")
-    lines += [
-        f"{flag} *{esc(market)} Market Summary*",
-        f"🗓 {today}  \\|  🕐 {tz_label}: {time_str}",
-        "",
-    ]
-
-    # ── Pre-Market Cues ──────────────────────────────────────────────────────────
-    lines += fmt_premarket_cues(global_cues, global_pulse)
-
-    # ── Global Market Pulse ───────────────────────────────────────────────────────
-    lines += fmt_global_pulse(global_pulse)
-
-    # ── Market status ─────────────────────────────────────────────────────────
-    lines += [
-        "*🌐 Market Status*",
-        f"🇮🇳 NSE:  {nse_status}",
-        f"🇺🇸 NYSE: {nyse_status}",
-        "",
-    ]
-
-    # ── Sentiment + Regime ────────────────────────────────────────────────────
     sentiment = sentiment_bar(active_vix, avg_pct)
     regime    = market_regime(avg_pct, active_vix)
+
+    lines: list[str] = []
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 1. HEADER  📊 Market Snapshot (23 Jun | 7:15 PM)
+    # ══════════════════════════════════════════════════════════════════════════
+    flag = "🇮🇳" if is_nse else "🇺🇸"
+    mkt_label = esc("NSE India" if is_nse else "US Markets")
     lines += [
-        f"*📡 Market Mood:* {sentiment}",
-        f"*🏷 Regime:* {esc(regime)}",
+        f"📊 {flag} *{mkt_label} Snapshot* \\({esc(date_str)} \\| {esc(time_str)}\\)",
         "",
     ]
 
-    # ── Indices + Sparklines ──────────────────────────────────────────────────
-    lines.append("*📈 Indices*")
-    ticker_map = idx_tickers
-    for row in index_rows:
-        if "error" in row:
-            lines.append(f"• {esc(row['name'])}: N/A")
-            continue
-        a    = arrow(row["pct"])
-        sign = "+" if row["change"] >= 0 else ""
-        sym  = ticker_map.get(row["name"], "")
-        spark = esc(get_sparkline(sym)) if sym else ""
-        name  = esc(row["name"])
-        close = esc(f"{row['close']:,.2f}")
-        chg   = esc(f"{sign}{row['change']:,.2f}")
-        pct   = esc(f"{sign}{row['pct']:.2f}%")
-        lines.append(f"{a} *{name}* {spark}  {close} \\({chg} \\| {pct}\\)")
+    # ══════════════════════════════════════════════════════════════════════════
+    # 2. MOOD LINE  Mood: Bearish | Regime: Choppy
+    #               India VIX: 12.97 (Low) | US VIX: 17.28 (Medium)
+    # ══════════════════════════════════════════════════════════════════════════
+    # Strip markdown arrows/emojis from sentiment/regime for the compact line
+    mood_clean   = sentiment.split(" ", 1)[-1]   # e.g. "Bullish" from "🟢 Bullish"
+    regime_clean = regime.replace("\\-", "-")
+
+    vix_parts = []
+    if is_nse and india_vix_val:
+        vtag = vix_tag(india_vix_val).split(" ", 1)[-1]
+        vtag_short = vtag.replace(" Volatility", "").replace(" Risk", "")
+        vix_parts.append(esc(f"India VIX: {india_vix_val:.2f} ({vtag_short})"))
+    if not is_nse and vix_val:
+        vtag = vix_tag(vix_val).split(" ", 1)[-1]
+        vtag_short = vtag.replace(" Volatility", "").replace(" Risk", "")
+        vix_parts.append(esc(f"US VIX: {vix_val:.2f} ({vtag_short})"))
+    # Always show both when both are meaningful (cross-market context)
+    if is_nse and vix_val:
+        vtag = vix_tag(vix_val).split(" ", 1)[-1]
+        vtag_short = vtag.replace(" Volatility", "").replace(" Risk", "")
+        vix_parts.append(esc(f"US VIX: {vix_val:.2f} ({vtag_short})"))
+
+    lines.append(
+        f"Mood: *{esc(mood_clean)}*  \\|  Regime: *{esc(regime_clean)}*"
+    )
+    if vix_parts:
+        lines.append("  ".join(vix_parts))
     lines.append("")
 
-    # ── Volatility ────────────────────────────────────────────────────────────
-    lines.append("*⚡ Volatility*")
-    if india_vix_val:
-        lines.append(f"🇮🇳 India VIX: {esc(f'{india_vix_val:.2f}')}  {vix_tag(india_vix_val)}")
-    if vix_val:
-        lines.append(f"🇺🇸 US VIX:    {esc(f'{vix_val:.2f}')}  {vix_tag(vix_val)}")
-    lines.append("")
+    # ══════════════════════════════════════════════════════════════════════════
+    # 3. GLOBAL CUES  🌍 *Global Cues*
+    #    SGX Nifty / Dow Fut / US10Y / Crude / Gold / Silver / USDINR
+    # ══════════════════════════════════════════════════════════════════════════
+    if global_cues:
+        lines.append("🌍 *Global Cues*")
+        cue_map = {g["name"]: g for g in global_cues}
 
-    # ── Sector Heat ───────────────────────────────────────────────────────────
-    if sector_rows:
-        lines.append("*🌡 Sector Heat \\| RSI*")
-        for s in sector_rows:
-            dot   = sector_dot(s["pct"])
-            sign  = "+" if s["pct"] >= 0 else ""
-            spct  = esc(f"{sign}{s['pct']:.1f}%")
-            sname = esc(s["name"])
-            rsi   = s.get("rsi")
-            tag   = rsi_tag(rsi)
-            rsi_str = esc(f"{rsi}") if rsi is not None else "N/A"
-            lines.append(f"{dot} {sname}: {spct}  \\|  RSI: {rsi_str} {tag}")
+        # Futures line (SGX Nifty or Dow Fut + S&P Fut)
+        fut_parts = []
+        for name in (["SGX Nifty", "Dow Futures"] if is_nse else ["Dow Futures", "S&P Fut"]):
+            g = cue_map.get(name)
+            if g:
+                sign = "+" if g["pct"] >= 0 else ""
+                label = name.replace(" Futures", " Fut")
+                fut_parts.append(esc(f"{label}: {g['close']:,.0f} ({sign}{g['pct']:.1f}%)"))
+        if fut_parts:
+            lines.append("  ".join(fut_parts))
+
+        # US 10Y yield
+        g = cue_map.get("US 10Y")
+        if g:
+            lines.append(esc(f"US10Y: {g['close']:.2f}%"))
+
+        # Commodities line
+        comm_parts = []
+        for name, fmt in [("Crude Oil", "{:.2f}"), ("Gold (USD)", "{:,.0f}"), ("Silver (USD)", "{:.2f}")]:
+            g = cue_map.get(name)
+            if g:
+                label = name.replace(" (USD)", "").replace(" Oil", "")
+                comm_parts.append(esc(f"{label}: {fmt.format(g['close'])}"))
+        if comm_parts:
+            lines.append("  \\|  ".join(comm_parts))
+
+        # USDINR
+        g = cue_map.get("USDINR")
+        if g:
+            sign = "+" if g["pct"] >= 0 else ""
+            lines.append(esc(f"USDINR: {g['close']:.2f} ({sign}{g['pct']:.2f}%)"))
+
         lines.append("")
 
-    # ── Sector Buzz ──────────────────────────────────────────────────────────────
-    if sector_rows:
-        buzz = get_sector_buzz(sector_rows)
-        lines += fmt_sector_buzz(buzz)
+    # ══════════════════════════════════════════════════════════════════════════
+    # 4. INDICES  📈 *Indices*
+    #    Dow: +0.29% | S&P 500: -0.37% | Nasdaq: -1.32%
+    # ══════════════════════════════════════════════════════════════════════════
+    valid_idx = [r for r in index_rows if "pct" in r and r["name"] != "VIX"]
+    if valid_idx:
+        lines.append("📈 *Indices*")
+        for row in valid_idx:
+            a    = arrow(row["pct"])
+            sign = "+" if row["pct"] >= 0 else ""
+            name = esc(row["name"])
+            pct  = esc(f"{sign}{row['pct']:.2f}%")
+            lines.append(f"{a} {name}: {pct}")
+        lines.append("")
 
-    # ── Gainers & Losers ──────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # 5. SECTOR HEATMAP  🔥 *Sector Heatmap*
+    #    Energy +0.5% (Strong, 5D +1.2%, Score 68)
+    # ══════════════════════════════════════════════════════════════════════════
+    if sector_rows:
+        lines.append("🔥 *Sector Heatmap*")
+        for s in sorted(sector_rows, key=lambda x: x.get("pct", 0), reverse=True):
+            dot  = sector_dot(s["pct"])
+            sign = "+" if s["pct"] >= 0 else ""
+            pct  = esc(f"{sign}{s['pct']:.1f}%")
+            name = esc(s["name"])
+
+            # Strength label
+            score = s.get("score", 50)
+            if score >= 65:
+                strength = "Strong"
+            elif score <= 35:
+                strength = "Weak"
+            else:
+                strength = "Neutral"
+
+            # OB/OS tag
+            rsi    = s.get("rsi")
+            ob_tag = ""
+            if rsi is not None:
+                if rsi >= 70:
+                    ob_tag = " ⚠️OB"
+                elif rsi <= 30:
+                    ob_tag = " 💡OS"
+
+            # 5-day trend
+            pct_5d = s.get("pct_5d")
+            if pct_5d is not None:
+                s5sign = "+" if pct_5d >= 0 else ""
+                trend5 = esc(f", 5D {s5sign}{pct_5d:.1f}%")
+            else:
+                trend5 = ""
+
+            lines.append(f"{dot} {name} {pct} \\({esc(strength)}{trend5}\\){ob_tag}")
+        lines.append("")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 6. TOP GAINERS  🏆 *Top Gainers*
+    #    JPM +1.92% — Strong earnings outlook  | 2.1× vol
+    # ══════════════════════════════════════════════════════════════════════════
     if gainers:
-        lines.append("*🚀 Top Gainers*")
+        lines.append("🏆 *Top Gainers*")
         for s in gainers:
-            gpct  = esc(f"+{s['pct']:.2f}%")
-            gname = esc(s["name"])
-            gsym  = esc(s["symbol"])
-            lines.append(f"🟢 {gname} \\({gsym}\\): {gpct}")
+            pct    = esc(f"+{s['pct']:.2f}%")
+            name   = esc(s["name"])
+            reason = esc(why_moved(s["name"], s["symbol"], s["pct"]))
+            vol_x  = s.get("vol_x")
+            vol_s  = esc(f"  \\|  {vol_x}× vol") if vol_x else ""
+            lines.append(f"🟢 *{name}* {pct} — {reason}{vol_s}")
         lines.append("")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 7. TOP LOSERS  🔻 *Top Losers*
+    # ══════════════════════════════════════════════════════════════════════════
     if losers:
-        lines.append("*🔻 Top Losers*")
+        lines.append("🔻 *Top Losers*")
         for s in losers:
-            lpct  = esc(f"{s['pct']:.2f}%")
-            lname = esc(s["name"])
-            lsym  = esc(s["symbol"])
-            lines.append(f"🔴 {lname} \\({lsym}\\): {lpct}")
+            pct    = esc(f"{s['pct']:.2f}%")
+            name   = esc(s["name"])
+            reason = esc(why_moved(s["name"], s["symbol"], s["pct"]))
+            vol_x  = s.get("vol_x")
+            vol_s  = esc(f"  \\|  {vol_x}× vol") if vol_x else ""
+            lines.append(f"🔴 *{name}* {pct} — {reason}{vol_s}")
         lines.append("")
 
-    # ── Unusual Volume ───────────────────────────────────────────────────────────
-    lines += fmt_volume_spikes(vol_spikes)
-
-    # ── FII / DII Flows ───────────────────────────────────────────────────────────
-    lines += fmt_fii_dii(fii_dii_lines)
-
-    # ── Bulk & Block Deals ────────────────────────────────────────────────────────
-    lines += fmt_bulk_block_deals(bulk_block_lines)
-
-    # ── Insider Activity ──────────────────────────────────────────────────────────
-    lines += fmt_insider_activity(insider_lines)
-
-    # ── IPO / Listing ─────────────────────────────────────────────────────────────
-    lines += fmt_ipo(ipo_lines)
-
-    # ── Corporate Actions ─────────────────────────────────────────────────────────
-    lines += fmt_corp_actions(corp_action_lines)
-
-    # ── Regulatory Alerts ─────────────────────────────────────────────────────────
-    lines += fmt_regulatory_alerts(regulatory_lines)
-
-    # ── Earnings Snapshot ─────────────────────────────────────────────────────────
-    lines += fmt_earnings_snapshot(earnings_lines)
-
-    # ── News by Category ──────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # 8. KEY NEWS  📰 *Key News (Impact Score)*
+    #    🔥 Headline text
+    #    ⚠️ ...
+    #    💤 ...
+    # ══════════════════════════════════════════════════════════════════════════
     if headlines:
-        categorized: dict = {}
-        for h in headlines:
-            cat = categorize_headline(h)
-            categorized.setdefault(cat, []).append(h)
+        lines.append("📰 *Key News \\(Impact Score\\)*")
+        # Sort headlines: High first, then Medium, then Low
+        _order = {"🔥 High": 0, "⚠️ Medium": 1, "💤 Low": 2}
+        scored = sorted(headlines, key=lambda h: _order.get(news_impact_score(h), 9))
+        for h in scored[:8]:   # cap at 8 items to stay compact
+            impact = news_impact_score(h)
+            emoji  = impact.split()[0]          # just the emoji
+            lines.append(f"{emoji} {esc(h)}")
+        lines.append("")
 
-        # Header + timestamp block
-        lines += [
-            "*📰 TOP HEADLINES*",
-            f"🕒 Updated: {ist_str}",
-            "",
-        ]
+    # ══════════════════════════════════════════════════════════════════════════
+    # 9. EXTRA: FII/DII, IPO, Corp Actions, Earnings, Regulatory — compact rows
+    # ══════════════════════════════════════════════════════════════════════════
+    extra_blocks = [
+        ("💸 FII\\/DII",        fii_dii_lines[:2]),
+        ("📋 IPO\\/Listing",    ipo_lines[:2]),
+        ("🎁 Corp Actions",     corp_action_lines[:2]),
+        ("💰 Earnings",         earnings_lines[:3]),
+        ("⚖️ Regulatory",       regulatory_lines[:2]),
+        ("🏦 Bulk\\/Block",     bulk_block_lines[:2]),
+        ("👔 Insider",          insider_lines[:2]),
+    ]
+    for header, items in extra_blocks:
+        if items:
+            lines.append(f"*{header}*")
+            for h in items:
+                lines.append(f"• {esc(h)}")
+            lines.append("")
 
-        # Per-section sentiment summary (remove block to disable)
-        lines += build_sentiment_summary(categorized, avg_pct, active_vix)
+    # ══════════════════════════════════════════════════════════════════════════
+    # 10. TAKEAWAY  🎯 *Takeaway*
+    #     One punchy sentence traders can act on immediately.
+    # ══════════════════════════════════════════════════════════════════════════
+    lines.append("🎯 *Takeaway*")
 
-        # Punchy categorised news with context tags
-        lines += format_news_section(categorized)
+    # Build the single-sentence takeaway
+    region = "India" if is_nse else "US"
+    open_bias = (
+        "expect bullish open" if avg_pct > 0.5
+        else "expect cautious open" if avg_pct < -0.5
+        else "expect range\\-bound open"
+    )
 
+    # Weakest + strongest sector for the sentence
+    if sector_rows:
+        top_s  = max(sector_rows, key=lambda x: x.get("pct", 0))
+        weak_s = min(sector_rows, key=lambda x: x.get("pct", 0))
+        sector_note = (
+            f"watch *{esc(top_s['name'])}* strength"
+            if top_s["pct"] > 0
+            else f"watch *{esc(weak_s['name'])}* weakness"
+        )
+        if top_s["pct"] > 0 and weak_s["pct"] < -0.3:
+            sector_note = (
+                f"watch *{esc(weak_s['name'])}* weakness"
+                f" & *{esc(top_s['name'])}* strength"
+            )
+    else:
+        sector_note = "monitor key sectors"
+
+    # VIX rider
+    vix_rider = ""
+    if active_vix is not None:
+        if active_vix > 22:
+            vix_rider = f"; VIX elevated at {esc(f'{active_vix:.1f}')} — reduce size"
+        elif active_vix < 14:
+            vix_rider = f"; VIX low at {esc(f'{active_vix:.1f}')} — options cheap"
+
+    lines.append(
+        f"{esc(open_bias).capitalize()}; {sector_note}{vix_rider}\\."
+    )
+    lines.append("")
     lines.append(esc("━" * 22))
     return "\n".join(lines)
 
@@ -1100,12 +1499,8 @@ def run(config: dict, market: str = "both"):
     global_cues  = get_global_cues()
     global_pulse = get_global_pulse()
 
-    if global_cues or global_pulse:
-        ok = send_telegram_safe(token, chat_id, build_global_cues_message(global_cues))
-        print(f"  Global Cues Telegram: {'sent ✓' if ok else 'FAILED ✗'}")
-
-    # FIX #3 — Always process NSE before NYSE so messages arrive in the right order.
-    # Global cues (pre-market context) are injected ONLY into the NSE message.
+    # NSE before NYSE so messages arrive in the right order.
+    # Global cues are embedded inline into each report (no separate message).
     markets = []
     if market in ("nse", "both"):
         markets.append(("NSE India", NSE_TICKERS, NSE_SECTORS, TOP_NSE_STOCKS, NSE_FEEDS, "india"))
@@ -1132,9 +1527,11 @@ def run(config: dict, market: str = "both"):
         print(f"  Vol spikes: {len(vol_spikes)} | FII/DII: {len(fii_dii_lines)} | "
               f"IPO: {len(ipo_lines)} | Earnings: {len(earn_lines)}")
 
-        # FIX #3 — Global cues only go into the NSE message (pre-market context for India).
-        # NYSE message gets clean US-only content with no Indian pre-market data.
-        msg_global_cues  = global_cues  if is_nse else []
+        # Global cues injected into NSE report; NYSE gets US-only cues
+        msg_global_cues  = global_cues  if is_nse else [
+            g for g in global_cues
+            if g["name"] in {"Dow Futures", "US 10Y", "Crude Oil", "Gold (USD)", "Silver (USD)"}
+        ]
         msg_global_pulse = global_pulse if is_nse else []
 
         msg = build_message(
@@ -1153,7 +1550,6 @@ def run(config: dict, market: str = "both"):
             regulatory_lines  = reg_lines,
             earnings_lines    = earn_lines,
         )
-        # FIX #2 — Use safe sender that splits messages exceeding Telegram's 4096-char limit
         ok = send_telegram_safe(token, chat_id, msg)
         print(f"  Telegram [{label}]: {'sent ✓' if ok else 'FAILED ✗'}")
 
