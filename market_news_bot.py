@@ -87,6 +87,7 @@ GLOBAL_CUES = {
     "Gold (USD)":   "GC=F",        # Comex Gold
     "Silver (USD)": "SI=F",        # Comex Silver
     "USDINR":       "INR=X",       # USD/INR rate
+    "DXY":          "DX-Y.NYB",    # US Dollar Index
     "Gold India":   "GOLDBEES.NS", # NSE Gold ETF (INR)
     "Silver India": "SILVERBEES.NS",# NSE Silver ETF (INR)
 }
@@ -264,15 +265,29 @@ def get_gainers_losers(symbols: list) -> tuple:
         if sym in seen_syms:
             continue
         try:
-            hist = yf.Ticker(sym).history(period="2d")
+            hist = yf.Ticker(sym).history(period="25d")
             if len(hist) < 2:
                 continue
             close = hist["Close"].iloc[-1]
             prev  = hist["Close"].iloc[-2]
             pct   = ((close - prev) / prev * 100) if prev else 0
+            # Volume context vs 20-day average
+            vol_x = None
+            if len(hist) >= 21:
+                avg_vol   = hist["Volume"].iloc[:-1].mean()
+                today_vol = hist["Volume"].iloc[-1]
+                if avg_vol > 0:
+                    vol_x = round(today_vol / avg_vol, 1)
             info  = yf.Ticker(sym).info
             name  = info.get("shortName") or sym
-            movers.append({"name": name, "symbol": sym, "pct": pct})
+            sector = info.get("sector", "")
+            movers.append({
+                "name":   name,
+                "symbol": sym,
+                "pct":    pct,
+                "vol_x":  vol_x,
+                "sector": sector,
+            })
             seen_syms.add(sym)
         except Exception:
             pass
@@ -298,12 +313,13 @@ def get_sparkline(symbol: str, days: int = 7) -> str:
         trend = ""
         for i in range(1, len(recent)):
             diff = recent[i] - recent[i - 1]
+            pct_chg = abs(diff / recent[i - 1] * 100) if recent[i - 1] else 0
             if diff > 0:
                 trend += "↑"
             elif diff < 0:
                 trend += "↓"
             else:
-                trend += "→"
+                trend += "─"
         return trend
     except Exception:
         return ""
@@ -541,6 +557,56 @@ def fmt_market_bias(score: int, label: str) -> list:
     ]
 
 
+def mood_explanation(
+    avg_pct: float,
+    vix: float | None,
+    sector_rows: list,
+    global_pulse: list,
+    losers: list,
+) -> str:
+    """
+    Generate a 1-line 'why' for the current market mood.
+    e.g. 'Bearish due to Tech-led selloff and weak Nasdaq breadth.'
+    """
+    reasons = []
+
+    # Worst sector — primary driver when clearly negative
+    if sector_rows:
+        worst = min(sector_rows, key=lambda s: s.get("pct", 0))
+        if worst.get("pct", 0) < -0.5:
+            reasons.append(f"{worst['name']}\\-led selloff")
+
+    # Top losers contribute named drivers
+    if losers:
+        big = [s["name"] for s in losers if abs(s.get("pct", 0)) >= 1.5]
+        if big:
+            reasons.append(f"heavy losses in {', '.join(big[:2])}")
+
+    # VIX context
+    if vix is not None:
+        if vix > 25:
+            reasons.append("VIX spiking")
+        elif vix < 13 and avg_pct > 0:
+            reasons.append("VIX subdued — calm rally")
+
+    # Global cues
+    if global_pulse:
+        neg = [g["name"] for g in global_pulse if g.get("pct", 0) < -0.5]
+        if len(neg) >= 3:
+            reasons.append(f"weak global breadth \\({', '.join(neg[:2])}\\)")
+        elif not neg and avg_pct > 0:
+            reasons.append("supportive global cues")
+
+    if not reasons:
+        if avg_pct > 0.3:
+            return "Broad buying across indices"
+        elif avg_pct < -0.3:
+            return "Broad selling pressure"
+        return "No dominant catalyst — range\\-bound action"
+
+    return "Due to: " + "; ".join(reasons)
+
+
 def vix_tag(vix: float | None) -> str:
     if vix is None:
         return "N/A"
@@ -585,6 +651,42 @@ def market_status(tz_name: str, open_h: int, open_m: int, close_h: int, close_m:
 
 
 # ─── New category fetchers ────────────────────────────────────────────────────
+
+US_FUTURES_TICKERS = {
+    "Dow Fut":    "YM=F",
+    "S&P Fut":    "ES=F",
+    "Nasdaq Fut": "NQ=F",
+    "Russell Fut":"RTY=F",
+}
+
+
+def get_us_futures() -> list:
+    """Fetch US equity index futures."""
+    rows = []
+    for name, symbol in US_FUTURES_TICKERS.items():
+        try:
+            d = get_ticker(symbol)
+            if d and d["close"] and d["close"] > 0:
+                rows.append({"name": name, "close": d["close"], "pct": d["pct"]})
+        except Exception:
+            pass
+    return rows
+
+
+def fmt_us_futures(futures: list) -> list:
+    """Format the US Futures Snapshot block."""
+    if not futures:
+        return []
+    lines = ["*📡 US FUTURES SNAPSHOT*"]
+    for f in futures:
+        a    = arrow(f["pct"])
+        sign = "+" if f["pct"] >= 0 else ""
+        name = esc(f["name"])
+        pct  = esc(f"{sign}{f['pct']:.2f}%")
+        lines.append(f"{a} {name}: {pct}")
+    lines.append("")
+    return lines
+
 
 def get_global_pulse() -> list:
     """Asia + Europe + US Futures for Global Market Pulse section."""
@@ -716,20 +818,18 @@ def get_premarket_levels(idx_tickers: dict) -> list:
 
 
 def fmt_premarket_levels(levels: list) -> list:
-    """Format Pre-Market Support/Resistance block."""
+    """Format Pre-Market Support/Resistance block — lean, no emoji overload."""
     if not levels:
         return []
-    lines = ["*📐 KEY LEVELS \\(Pivot\\)*"]
+    lines = ["*📐 KEY LEVELS*"]
     for lv in levels:
-        name  = esc(lv["name"])
-        s2    = esc(f"{lv['s2']:,.0f}")
-        s1    = esc(f"{lv['s1']:,.0f}")
-        r1    = esc(f"{lv['r1']:,.0f}")
-        r2    = esc(f"{lv['r2']:,.0f}")
-        lines.append(f"*{name}*")
-        lines.append(f"  🟢 R2: {r2}  \\|  R1: {r1}")
-        lines.append(f"  🔴 S1: {s1}  \\|  S2: {s2}")
-        lines.append(f"  ↔️ Range: {s1} — {r1}")
+        name = esc(lv["name"])
+        s2   = esc(f"{lv['s2']:,.0f}")
+        s1   = esc(f"{lv['s1']:,.0f}")
+        r1   = esc(f"{lv['r1']:,.0f}")
+        r2   = esc(f"{lv['r2']:,.0f}")
+        lines.append(f"*{name}*  R1: {r1}  R2: {r2}  \\|  S1: {s1}  S2: {s2}")
+        lines.append(f"  Range: {s1} — {r1}")
     lines.append("")
     return lines
 
@@ -1020,6 +1120,62 @@ def build_sentiment_summary(categorized: dict, avg_pct: float, vix: float | None
 
 # ─── New section formatters ──────────────────────────────────────────────────
 
+def build_macro_risk_meter(
+    vix: float | None,
+    global_pulse: list,
+    global_cues: list,
+    headlines: list,
+) -> list:
+    """
+    3-item Macro Risk Meter: Inflation, Rates, Geo.
+    All derived from live VIX, bond yield, cue moves, and headline keywords.
+    Returns formatted lines.
+    """
+    # ── Inflation risk ────────────────────────────────────────────────────────
+    crude = next((g for g in global_cues if g["name"] == "Crude Oil"), None)
+    infl_kw = ["inflation", "cpi", "pce", "price index", "consumer price"]
+    infl_headline = any(any(kw in h.lower() for kw in infl_kw) for h in headlines)
+    crude_rising  = crude and crude.get("pct", 0) > 1.0
+    if crude_rising and infl_headline:
+        infl_level, infl_dot = "High",   "🔴"
+    elif crude_rising or infl_headline:
+        infl_level, infl_dot = "Medium", "🟡"
+    else:
+        infl_level, infl_dot = "Low",    "🟢"
+
+    # ── Rates risk ────────────────────────────────────────────────────────────
+    us10y = next((g for g in global_cues if g["name"] == "US 10Y"), None)
+    rate_kw = ["fed", "rate hike", "rate cut", "fomc", "taper", "rbi", "boe", "ecb"]
+    rate_headline = any(any(kw in h.lower() for kw in rate_kw) for h in headlines)
+    yield_rising  = us10y and us10y.get("pct", 0) > 0.5
+    if yield_rising and rate_headline:
+        rate_level, rate_dot = "High",   "🔴"
+    elif yield_rising or rate_headline:
+        rate_level, rate_dot = "Medium", "🟡"
+    else:
+        rate_level, rate_dot = "Low",    "🟢"
+
+    # ── Geo risk ─────────────────────────────────────────────────────────────
+    geo_kw = ["war", "iran", "china", "russia", "sanction", "conflict",
+              "israel", "north korea", "taiwan", "geopolit", "attack"]
+    geo_count = sum(1 for h in headlines if any(kw in h.lower() for kw in geo_kw))
+    neg_global = sum(1 for g in global_pulse if g.get("pct", 0) < -1.0)
+    if geo_count >= 2 or neg_global >= 5:
+        geo_level, geo_dot = "High",   "🔴"
+    elif geo_count >= 1 or neg_global >= 3:
+        geo_level, geo_dot = "Medium", "🟡"
+    else:
+        geo_level, geo_dot = "Low",    "🟢"
+
+    return [
+        "*🧭 MACRO RISK METER*",
+        f"  Inflation: {infl_dot} {esc(infl_level)}  \\|  "
+        f"Rates: {rate_dot} {esc(rate_level)}  \\|  "
+        f"Geo: {geo_dot} {esc(geo_level)}",
+        "",
+    ]
+
+
 def build_risk_alerts(
     global_cues: list,
     vix: float | None,
@@ -1094,7 +1250,7 @@ def fmt_premarket_cues(global_cues: list, global_pulse: list) -> list:
     """Pre-market cues block: SGX Nifty, Dow Fut, Crude, USD."""
     if not global_cues:
         return []
-    priority = {"SGX Nifty", "Dow Futures", "Crude Oil", "USDINR", "US 10Y"}
+    priority = {"SGX Nifty", "Dow Futures", "Crude Oil", "USDINR", "US 10Y", "DXY"}
     lines = ["*🌅 PRE\\-MARKET CUES*"]
     for g in global_cues:
         if g["name"] in priority:
@@ -1138,20 +1294,54 @@ def fmt_global_pulse(global_pulse: list) -> list:
     return lines
 
 
+def sector_buzz_reason(s: dict, bullish: bool) -> str:
+    """
+    Generate a 1-line visible reason for Strong/Weak label.
+    Resolves contradictions: green price + low RSI = 'weak despite gains'.
+    """
+    pct   = s.get("pct", 0)
+    rsi   = s.get("rsi")
+    trend = s.get("trend", "")
+    str_  = s.get("strength", 5)
+
+    if bullish:
+        if pct > 1.0 and rsi and rsi > 55:
+            return "price \\+ RSI momentum confirm strength"
+        if pct > 0.5 and str_ >= 6:
+            return "solid breadth \\+ sector momentum"
+        if pct > 0 and rsi and rsi < 45:
+            return "green but RSI lagging — cautious strength"
+        if trend == "OB — Weakening":
+            return "overbought — watch for reversal"
+        return "leading gains; macro supportive"
+    else:
+        if pct < 0 and rsi and rsi < 40:
+            return "price \\+ RSI both weak — confirmed downside"
+        if pct >= 0 and str_ <= 4:
+            return "green price but weak breadth \\& RSI — misleading"
+        if trend == "Reversal Attempt":
+            return "oversold bounce attempt; not confirmed"
+        if pct < -0.5:
+            return "sector rotation away; volume confirms"
+        return "lagging peers; no catalyst"
+
+
 def fmt_sector_buzz(buzz: dict) -> list:
-    """Sector buzz: top strong and weak sectors."""
+    """Sector buzz: top strong and weak sectors with visible reasoning."""
     if not buzz.get("bullish") and not buzz.get("bearish"):
         return []
     lines = ["*🌡 SECTOR BUZZ*"]
     sep = "\\|"
     for s in buzz.get("bullish", []):
-        sign = "+" if s["pct"] >= 0 else ""
-        pct_s = esc(f"{sign}{s['pct']:.1f}%")
-        lines.append(f"🟢 *{esc(s['name'])}*: {pct_s}  {sep}  🔥 Strong")
+        sign   = "+" if s["pct"] >= 0 else ""
+        pct_s  = esc(f"{sign}{s['pct']:.1f}%")
+        reason = sector_buzz_reason(s, bullish=True)
+        lines.append(f"🟢 *{esc(s['name'])}*: {pct_s}  {sep}  🔥 Strong — {reason}")
     for s in buzz.get("bearish", []):
-        sign = "+" if s["pct"] >= 0 else ""
-        pct_s = esc(f"{sign}{s['pct']:.1f}%")
-        lines.append(f"🔴 *{esc(s['name'])}*: {pct_s}  {sep}  🧊 Weak")
+        sign   = "+" if s["pct"] >= 0 else ""
+        pct_s  = esc(f"{sign}{s['pct']:.1f}%")
+        reason = sector_buzz_reason(s, bullish=False)
+        lines.append(f"🔴 *{esc(s['name'])}*: {pct_s}  {sep}  🧊 Weak — {reason}")
     lines.append("")
     return lines
 
@@ -1329,6 +1519,148 @@ def fmt_volume_spikes(spikes: list) -> list:
 
 # ─── Message builder ─────────────────────────────────────────────────────────
 
+def build_watchlist(
+    gainers: list,
+    losers: list,
+    sector_rows: list,
+    vol_spikes: list,
+) -> list:
+    """
+    Build a 'Next Session Watchlist' from:
+    - Big movers (gainers/losers with high vol or large pct)
+    - Leading/lagging sectors (top ETFs)
+    - Unusual volume spikes
+    Deduplicates and limits to 5 items.
+    """
+    items = []
+    seen_names: set = set()
+
+    def add(name: str, note: str):
+        key = name.lower().strip()
+        if key not in seen_names and len(items) < 5:
+            seen_names.add(key)
+            items.append((name, note))
+
+    # Big losers first (more actionable for next session)
+    for s in losers:
+        pct   = s.get("pct", 0)
+        vol_x = s.get("vol_x")
+        if abs(pct) >= 1.5:
+            vol_note = f" \\({esc(f'{vol_x}× vol')}\\)" if vol_x else ""
+            add(s["name"], f"heavy selloff{vol_note} — watch for continuation or reversal")
+        elif abs(pct) >= 0.8:
+            add(s["name"], f"technical pullback — check support levels")
+
+    # Strong gainers on high volume
+    for s in gainers:
+        pct   = s.get("pct", 0)
+        vol_x = s.get("vol_x")
+        if pct >= 1.5 and vol_x and vol_x >= 1.5:
+            add(s["name"], f"strong breakout \\({esc(f'{vol_x}× vol')}\\) — momentum play")
+        elif pct >= 0.8:
+            add(s["name"], "leading sector — watch for follow-through")
+
+    # Unusual volume spikes (even if not top mover)
+    for s in vol_spikes:
+        vol_x = s.get("vol_x", 1)
+        pct   = s.get("pct", 0)
+        if vol_x >= 2.5:
+            direction = "upside" if pct >= 0 else "downside"
+            add(s["name"], f"volume spike {esc(f'{vol_x}×')} — watch {direction} follow-through")
+
+    # Strongest and weakest sector (by ETF name)
+    if sector_rows:
+        best  = max(sector_rows, key=lambda s: s.get("pct", 0))
+        worst = min(sector_rows, key=lambda s: s.get("pct", 0))
+        if best.get("pct", 0) > 0.8:
+            add(best["name"] + " sector", "leadership — look for sector ETF or top names")
+        if worst.get("pct", 0) < -0.8:
+            add(worst["name"] + " sector", "lagging — avoid long exposure next session")
+
+    if not items:
+        return []
+
+    lines = ["*👀 NEXT SESSION WATCHLIST*"]
+    for name, note in items:
+        lines.append(f"• *{esc(name)}* — {note}")
+    lines.append("")
+    return lines
+
+
+def build_takeaway(
+    avg_pct: float,
+    sector_rows: list,
+    bias_label: str,
+    breadth: dict,
+    vix: float | None,
+    losers: list,
+    gainers: list,
+) -> list:
+    """
+    Generate a punchy 1–2 sentence 🎯 Takeaway for any market.
+    Derived from live data — never hardcoded.
+    """
+    parts = []
+
+    # Dominant sector drag or leadership
+    if sector_rows:
+        worst = min(sector_rows, key=lambda s: s.get("pct", 0))
+        best  = max(sector_rows, key=lambda s: s.get("pct", 0))
+        if worst.get("pct", 0) < -0.5:
+            parts.append(f"{esc(worst['name'])} weakness dragging indices")
+        if best.get("pct", 0) > 0.5:
+            parts.append(f"{esc(best['name'])} showing strength")
+
+    # Breadth context
+    bp = breadth.get("breadth_pct", 50) if breadth else 50
+    if bp < 40:
+        parts.append(esc("breadth poor"))
+    elif bp > 65:
+        parts.append(esc("broad participation"))
+
+    # VIX
+    if vix:
+        if vix > 22:
+            parts.append(esc("VIX elevated — expect choppy tape"))
+        elif vix < 14:
+            parts.append(esc("VIX low — calm conditions"))
+
+    # Closing outlook driven by bias
+    if avg_pct > 0.5:
+        outlook = esc(f"expect continued upside bias — {bias_label}")
+    elif avg_pct < -0.5:
+        outlook = esc(f"expect cautious tone — {bias_label}")
+    else:
+        outlook = esc(f"range\\-bound session likely — {bias_label}")
+
+    body = (esc("; ").join(parts) + esc(". ") + outlook) if parts else outlook
+    return [
+        "*🎯 TAKEAWAY*",
+        body,
+        "",
+    ]
+
+
+def _dedup_across_sections(*headline_lists: list) -> list[list]:
+    """
+    Remove headlines that appear in more than one section.
+    Priority order: first list wins, subsequent lists drop duplicates.
+    Also normalises whitespace for comparison.
+    Returns one deduplicated list per input.
+    """
+    seen: set = set()
+    result = []
+    for lst in headline_lists:
+        clean = []
+        for h in lst:
+            key = " ".join(h.lower().split())
+            if key not in seen:
+                seen.add(key)
+                clean.append(h)
+        result.append(clean)
+    return result
+
+
 def build_message(
     market: str,
     index_rows: list,
@@ -1352,7 +1684,9 @@ def build_message(
     breadth: dict | None = None,
     key_events: list | None = None,
     premarket_levels: list | None = None,
+    us_futures: list | None = None,
 ) -> str:
+    us_futures         = us_futures         or []
     global_cues        = global_cues        or []
     global_pulse       = global_pulse       or []
     vol_spikes         = vol_spikes         or []
@@ -1366,6 +1700,29 @@ def build_message(
     breadth            = breadth            or {}
     key_events         = key_events         or []
     premarket_levels   = premarket_levels   or []
+
+    # ── Suggestion 1: De-duplicate headlines across sections ─────────────────
+    # Priority: regulatory > earnings > key_events > fii_dii > headlines
+    # Anything already shown in Regulatory is dropped from all other sections.
+    key_event_descs = [e.get("description", "") for e in key_events]
+    (
+        regulatory_lines,
+        earnings_lines,
+        key_event_descs,
+        fii_dii_lines,
+        headlines,
+    ) = _dedup_across_sections(
+        regulatory_lines,
+        earnings_lines,
+        key_event_descs,
+        fii_dii_lines,
+        headlines,
+    )
+    key_events = [
+        e for e in key_events
+        if e.get("description", "") in key_event_descs
+    ]
+
     today = esc(datetime.date.today().strftime("%d %b %Y"))
     is_nse = "NSE" in market
 
@@ -1415,8 +1772,10 @@ def build_message(
     # ── Sentiment + Regime ────────────────────────────────────────────────────
     sentiment = sentiment_bar(active_vix, avg_pct)
     regime    = market_regime(avg_pct, active_vix)
+    mood_why  = mood_explanation(avg_pct, active_vix, sector_rows, global_pulse, losers)
     lines += [
         f"*📡 Market Mood:* {sentiment}",
+        f"  ↳ {mood_why}",
         f"*🏷 Regime:* {esc(regime)}",
         "",
     ]
@@ -1441,6 +1800,13 @@ def build_message(
     # ── Risk Alerts ───────────────────────────────────────────────────────────
     risk_alerts = build_risk_alerts(global_cues, vix_val, india_vix_val, sector_rows, global_pulse)
     lines += fmt_risk_alerts(risk_alerts)
+
+    # ── Macro Risk Meter ──────────────────────────────────────────────────────
+    lines += build_macro_risk_meter(active_vix, global_pulse, global_cues, headlines)
+
+    # ── US Futures Snapshot (US report only) ──────────────────────────────────
+    if not is_nse:
+        lines += fmt_us_futures(us_futures)
 
     # ── Indices + Sparklines ──────────────────────────────────────────────────
     lines.append("*📈 Indices*")
@@ -1478,7 +1844,7 @@ def build_message(
             sname    = esc(s["name"])
             rsi      = s.get("rsi")
             tag      = rsi_tag(rsi)
-            rsi_str  = esc(f"{rsi}") if rsi is not None else esc("N/A")
+            rsi_str  = esc(f"{int(round(rsi))}") if rsi is not None else esc("N/A")
             strength = s.get("strength")
             str_str  = esc(f"{strength}/10") if strength is not None else esc("N/A")
             trend    = esc(s.get("trend", ""))
@@ -1497,10 +1863,14 @@ def build_message(
     if gainers:
         lines.append("*🚀 TOP GAINERS*")
         for s in gainers:
-            gpct  = esc(f"+{s['pct']:.2f}%")
-            gname = esc(s["name"])
-            gsym  = esc(s["symbol"])
-            lines.append(f"🟢 {gname} \\({gsym}\\): {gpct}")
+            gpct   = esc(f"+{s['pct']:.2f}%")
+            gname  = esc(s["name"])
+            gsym   = esc(s["symbol"])
+            vol_x  = s.get("vol_x")
+            sector = s.get("sector", "")
+            vol_str = f"  \\|  Vol: {esc(f'{vol_x}×')}" if vol_x else ""
+            sec_str = f"  \\|  {esc(sector)}" if sector else ""
+            lines.append(f"🟢 {gname} \\({gsym}\\): {gpct}{vol_str}{sec_str}")
         lines.append("")
     if losers:
         lines.append("*🔻 TOP LOSERS*")
@@ -1509,7 +1879,9 @@ def build_message(
             lname  = esc(s["name"])
             lsym   = esc(s["symbol"])
             reason = esc(loser_reason(s))
-            lines.append(f"🔴 {lname} \\({lsym}\\): {lpct} — {reason}")
+            vol_x  = s.get("vol_x")
+            vol_str = f" \\({esc(f'{vol_x}× vol')}\\)" if vol_x else ""
+            lines.append(f"🔴 {lname} \\({lsym}\\): {lpct}{vol_str} — {reason}")
         lines.append("")
 
     # ── Unusual Volume ───────────────────────────────────────────────────────────
@@ -1560,6 +1932,12 @@ def build_message(
 
         # Punchy categorised news with context tags
         lines += format_news_section(categorized)
+
+    # ── Next Session Watchlist ────────────────────────────────────────────────
+    lines += build_watchlist(gainers, losers, sector_rows, vol_spikes)
+
+    # ── Takeaway ──────────────────────────────────────────────────────────────
+    lines += build_takeaway(avg_pct, sector_rows, bias_label, breadth, active_vix, losers, gainers)
 
     lines.append(esc("━" * 22))
     return "\n".join(lines)
@@ -1676,11 +2054,12 @@ def run(config: dict, market: str = "both"):
         reg_lines        = get_specialist_headlines("regulatory")
         earn_lines       = get_specialist_headlines("earnings")
 
-        # New: breadth, key events, pre-market levels
+        # New: breadth, key events, pre-market levels, US futures
         region_str       = "india" if is_nse else "us"
         breadth_data     = get_market_breadth(stock_list)
         key_events_data  = get_key_events(region=region_str)
         pm_levels        = get_premarket_levels(idx_tickers)
+        us_futures_data  = [] if is_nse else get_us_futures()
 
         print(f"  Vol spikes: {len(vol_spikes)} | FII/DII: {len(fii_dii_lines)} | "
               f"IPO: {len(ipo_lines)} | Earnings: {len(earn_lines)} | "
@@ -1709,6 +2088,7 @@ def run(config: dict, market: str = "both"):
             breadth           = breadth_data,
             key_events        = key_events_data,
             premarket_levels  = pm_levels,
+            us_futures        = us_futures_data,
         )
         # FIX #2 — Use safe sender that splits messages exceeding Telegram's 4096-char limit
         ok = send_telegram_safe(token, chat_id, msg)
