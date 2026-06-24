@@ -551,7 +551,7 @@ def fmt_market_bias(score: int, label: str) -> list:
     score_str = esc(f"{score}/100")
     label_str = esc(label)
     return [
-        f"*🎯 Market Bias Score:* {bar} {score_str} — {label_str}",
+        f"*🎯 Market Bias Score:* {bar} {score_str} \\— {label_str}",
         esc("  Inputs: VIX · Global cues · Sector breadth · Index momentum · USDINR"),
         "",
     ]
@@ -578,7 +578,7 @@ def mood_explanation(
 
     # Top losers contribute named drivers
     if losers:
-        big = [s["name"] for s in losers if abs(s.get("pct", 0)) >= 1.5]
+        big = [esc(s["name"]) for s in losers if abs(s.get("pct", 0)) >= 1.5]
         if big:
             reasons.append(f"heavy losses in {', '.join(big[:2])}")
 
@@ -777,7 +777,7 @@ def fmt_key_events(events: list) -> list:
     for e in events:
         t   = esc(e.get("time", ""))
         desc = esc(e.get("description", ""))
-        lines.append(f"• {t} — {desc}")
+        lines.append(f"• {t} \\— {desc}")
     lines.append("")
     return lines
 
@@ -829,7 +829,7 @@ def fmt_premarket_levels(levels: list) -> list:
         r1   = esc(f"{lv['r1']:,.0f}")
         r2   = esc(f"{lv['r2']:,.0f}")
         lines.append(f"*{name}*  R1: {r1}  R2: {r2}  \\|  S1: {s1}  S2: {s2}")
-        lines.append(f"  Range: {s1} — {r1}")
+        lines.append(f"  Range: {s1} \\— {r1}")
     lines.append("")
     return lines
 
@@ -893,7 +893,7 @@ def fmt_market_breadth(breadth: dict) -> list:
     return [
         "*📊 Market Breadth*",
         f"🟢 Advances: {adv}  \\|  🔴 Declines: {dec}  \\|  ⬜ Unchanged: {unc}",
-        f"{dot} Breadth Score: {bp_str} — {lbl_str}",
+        f"{dot} Breadth Score: {bp_str} \\— {lbl_str}",
         "",
     ]
 
@@ -957,7 +957,7 @@ def loser_reason(s: dict) -> str:
     is_nse = symbol.endswith(".NS")
 
     if vol_x and vol_x >= 2.0:
-        return f"Heavy selling — volume {vol_x}× avg"
+        return f"Heavy selling \\— volume {vol_x}× avg"
     if abs(pct) < 0.3:
         return "Mild profit booking; low volume drift"
     if abs(pct) < 0.8:
@@ -966,7 +966,7 @@ def loser_reason(s: dict) -> str:
         return "Mild pullback; no fresh catalyst"
     if abs(pct) < 2.0:
         return "Technical pullback; watch support"
-    return "Sharp sell-off — sector weakness or news-driven"
+    return "Sharp sell\\-off \\— sector weakness or news\\-driven"
 
 
 def arrow(pct: float) -> str:
@@ -1101,15 +1101,15 @@ def build_sentiment_summary(categorized: dict, avg_pct: float, vix: float | None
     # Overall bias
     if bias_label:
         if avg_pct > 0.3:
-            outlook = f"expect positive bias — {bias_label}"
+            outlook = f"expect positive bias \\— {esc(bias_label)}"
         elif avg_pct < -0.3:
-            outlook = f"expect cautious tone — {bias_label}"
+            outlook = f"expect cautious tone \\— {esc(bias_label)}"
         else:
-            outlook = f"expect range\\-bound to sideways — {bias_label}"
+            outlook = f"expect range\\-bound to sideways \\— {esc(bias_label)}"
     else:
         outlook = "mixed signals"
 
-    summary = esc(", ".join(parts)) + esc(" — ") + esc(outlook) if parts else esc(outlook)
+    summary = esc(", ".join(parts)) + esc(" — ") + outlook if parts else outlook
     return [
         "*💬 Sentiment Summary*",
         summary,
@@ -1193,44 +1193,44 @@ def build_risk_alerts(
     usdinr = next((g for g in global_cues if g["name"] == "USDINR"), None)
     if usdinr and usdinr.get("pct", 0) > 0.2:
         pct_s = esc(f"+{usdinr['pct']:.2f}%")
-        alerts.append(f"USDINR rising \\({pct_s}\\) — may pressure IT & import\\-heavy sectors")
+        alerts.append(f"USDINR rising \\({pct_s}\\) \\— may pressure IT & import\\-heavy sectors")
     elif usdinr and usdinr.get("pct", 0) < -0.2:
         pct_s = esc(f"{usdinr['pct']:.2f}%")
-        alerts.append(f"Rupee strengthening \\({pct_s}\\) — supportive for importers")
+        alerts.append(f"Rupee strengthening \\({pct_s}\\) \\— supportive for importers")
 
     # Crude oil
     crude = next((g for g in global_cues if g["name"] == "Crude Oil"), None)
     if crude:
         if crude.get("pct", 0) > 1.5:
             pct_s = esc(f"+{crude['pct']:.2f}%")
-            alerts.append(f"Crude surging \\({pct_s}\\) — negative for OMCs & aviation; watch inflation")
+            alerts.append(f"Crude surging \\({pct_s}\\) \\— negative for OMCs & aviation; watch inflation")
         elif crude.get("pct", 0) < -1.5:
             pct_s = esc(f"{crude['pct']:.2f}%")
-            alerts.append(f"Crude falling \\({pct_s}\\) — supportive for OMCs & broader market")
+            alerts.append(f"Crude falling \\({pct_s}\\) \\— supportive for OMCs & broader market")
 
     # VIX risk
     if vix and vix > 25:
-        alerts.append(f"US VIX elevated at {esc(f'{vix:.1f}')} — options expensive; heightened uncertainty")
+        alerts.append(f"US VIX elevated at {esc(f'{vix:.1f}')} \\— options expensive; heightened uncertainty")
     elif vix and vix < 13:
-        alerts.append(f"US VIX very low at {esc(f'{vix:.1f}')} — options cheap but prone to sudden spikes")
+        alerts.append(f"US VIX very low at {esc(f'{vix:.1f}')} \\— options cheap but prone to sudden spikes")
     if india_vix and india_vix > 18:
-        alerts.append(f"India VIX at {esc(f'{india_vix:.1f}')} — elevated; avoid naked short positions")
+        alerts.append(f"India VIX at {esc(f'{india_vix:.1f}')} \\— elevated; avoid naked short positions")
 
     # Global cue weakness (Nasdaq-IT link)
     nasdaq_fut = next((g for g in global_pulse if "Nasdaq" in g.get("name", "")), None)
     if nasdaq_fut and nasdaq_fut.get("pct", 0) < -0.5:
         pct_s = esc(f"{nasdaq_fut['pct']:.2f}%")
-        alerts.append(f"Nasdaq Fut weak \\({pct_s}\\) — watch IT sector intraday")
+        alerts.append(f"Nasdaq Fut weak \\({pct_s}\\) \\— watch IT sector intraday")
 
     # Broad global weakness
     neg_count = sum(1 for g in global_pulse if g.get("pct", 0) < -0.5)
     if neg_count >= 4:
-        alerts.append(f"{neg_count} global indices weak — expect cautious opening; watch support levels")
+        alerts.append(f"{neg_count} global indices weak \\— expect cautious opening; watch support levels")
 
     # Weak sector concentration
-    weak_sectors = [s["name"] for s in sector_rows if s.get("pct", 0) < -0.8]
+    weak_sectors = [esc(s["name"]) for s in sector_rows if s.get("pct", 0) < -0.8]
     if len(weak_sectors) >= 3:
-        alerts.append(f"Multiple sectors under pressure: {esc(', '.join(weak_sectors))} — breadth deteriorating")
+        alerts.append(f"Multiple sectors under pressure: {', '.join(weak_sectors)} \\— breadth deteriorating")
 
     return alerts
 
@@ -1336,12 +1336,12 @@ def fmt_sector_buzz(buzz: dict) -> list:
         sign   = "+" if s["pct"] >= 0 else ""
         pct_s  = esc(f"{sign}{s['pct']:.1f}%")
         reason = sector_buzz_reason(s, bullish=True)
-        lines.append(f"🟢 *{esc(s['name'])}*: {pct_s}  {sep}  🔥 Strong — {reason}")
+        lines.append(f"🟢 *{esc(s['name'])}*: {pct_s}  {sep}  🔥 Strong \\— {reason}")
     for s in buzz.get("bearish", []):
         sign   = "+" if s["pct"] >= 0 else ""
         pct_s  = esc(f"{sign}{s['pct']:.1f}%")
         reason = sector_buzz_reason(s, bullish=False)
-        lines.append(f"🔴 *{esc(s['name'])}*: {pct_s}  {sep}  🧊 Weak — {reason}")
+        lines.append(f"🔴 *{esc(s['name'])}*: {pct_s}  {sep}  🧊 Weak \\— {reason}")
     lines.append("")
     return lines
 
@@ -1404,7 +1404,7 @@ def fmt_fii_dii(headlines: list) -> list:
         lines.append(f"  FII: {fmt_flow(structured.get('fii'))}  \\|  DII: {fmt_flow(structured.get('dii'))}")
         net_arrow = "🟢" if net >= 0 else "🔴"
         net_str = esc(f"{'+'if net>=0 else ''}₹{abs(net):,.0f} Cr")
-        lines.append(f"  Net: {net_arrow} {net_str} — {net_tag}")
+        lines.append(f"  Net: {net_arrow} {net_str} \\— {net_tag}")
     else:
         for h in relevant[:4]:
             lines.append(f"• {esc(h)}")
@@ -1547,9 +1547,9 @@ def build_watchlist(
         vol_x = s.get("vol_x")
         if abs(pct) >= 1.5:
             vol_note = f" \\({esc(f'{vol_x}× vol')}\\)" if vol_x else ""
-            add(s["name"], f"heavy selloff{vol_note} — watch for continuation or reversal")
+            add(s["name"], f"heavy selloff{vol_note} \\— watch for continuation or reversal")
         elif abs(pct) >= 0.8:
-            add(s["name"], f"technical pullback — check support levels")
+            add(s["name"], f"technical pullback \\— check support levels")
 
     # Strong gainers on high volume
     for s in gainers:
@@ -1558,7 +1558,7 @@ def build_watchlist(
         if pct >= 1.5 and vol_x and vol_x >= 1.5:
             add(s["name"], f"strong breakout \\({esc(f'{vol_x}× vol')}\\) — momentum play")
         elif pct >= 0.8:
-            add(s["name"], "leading sector — watch for follow-through")
+            add(s["name"], "leading sector \\— watch for follow\\-through")
 
     # Unusual volume spikes (even if not top mover)
     for s in vol_spikes:
@@ -1566,23 +1566,23 @@ def build_watchlist(
         pct   = s.get("pct", 0)
         if vol_x >= 2.5:
             direction = "upside" if pct >= 0 else "downside"
-            add(s["name"], f"volume spike {esc(f'{vol_x}×')} — watch {direction} follow-through")
+            add(s["name"], f"volume spike {esc(f'{vol_x}×')} \\— watch {direction} follow\\-through")
 
     # Strongest and weakest sector (by ETF name)
     if sector_rows:
         best  = max(sector_rows, key=lambda s: s.get("pct", 0))
         worst = min(sector_rows, key=lambda s: s.get("pct", 0))
         if best.get("pct", 0) > 0.8:
-            add(best["name"] + " sector", "leadership — look for sector ETF or top names")
+            add(best["name"] + " sector", "leadership \\— look for sector ETF or top names")
         if worst.get("pct", 0) < -0.8:
-            add(worst["name"] + " sector", "lagging — avoid long exposure next session")
+            add(worst["name"] + " sector", "lagging \\— avoid long exposure next session")
 
     if not items:
         return []
 
     lines = ["*👀 NEXT SESSION WATCHLIST*"]
     for name, note in items:
-        lines.append(f"• *{esc(name)}* — {note}")
+        lines.append(f"• *{esc(name)}* \\— {note}")
     lines.append("")
     return lines
 
@@ -1881,7 +1881,7 @@ def build_message(
             reason = esc(loser_reason(s))
             vol_x  = s.get("vol_x")
             vol_str = f" \\({esc(f'{vol_x}× vol')}\\)" if vol_x else ""
-            lines.append(f"🔴 {lname} \\({lsym}\\): {lpct}{vol_str} — {reason}")
+            lines.append(f"🔴 {lname} \\({lsym}\\): {lpct}{vol_str} \\— {reason}")
         lines.append("")
 
     # ── Unusual Volume ───────────────────────────────────────────────────────────
