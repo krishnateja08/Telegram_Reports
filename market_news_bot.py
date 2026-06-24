@@ -1780,7 +1780,6 @@ def build_message(
     lines = []
 
     # ── Header ────────────────────────────────────────────────────────────────
-    # FIX #3 — Clear NSE vs NYSE differentiation with flag + relevant timezone only
     flag     = "🇮🇳" if is_nse else "🇺🇸"
     time_str = ist_str if is_nse else est_str
     tz_label = esc("IST") if is_nse else esc("EST")
@@ -1789,6 +1788,20 @@ def build_message(
         f"🗓 {today}  \\|  🕐 {tz_label}: {time_str}",
         "",
     ]
+
+    # ── TOP HEADLINES (moved to top so it's never cut off) ───────────────────
+    if headlines:
+        categorized: dict = {}
+        for h in headlines:
+            cat = categorize_headline(h)
+            categorized.setdefault(cat, []).append(h)
+
+        lines += [
+            "*📰 TOP HEADLINES*",
+            f"🕒 Updated: {ist_str}",
+            "",
+        ]
+        lines += format_news_section(categorized)
 
     # ── Pre-Market Cues ──────────────────────────────────────────────────────────
     lines += fmt_premarket_cues(global_cues, global_pulse)
@@ -1942,31 +1955,6 @@ def build_message(
 
     # ── Earnings Snapshot ─────────────────────────────────────────────────────────
     lines += fmt_earnings_snapshot(earnings_lines)
-
-    # ── News by Category ──────────────────────────────────────────────────────
-    if headlines:
-        categorized: dict = {}
-        for h in headlines:
-            cat = categorize_headline(h)
-            categorized.setdefault(cat, []).append(h)
-
-        # Header + timestamp block
-        lines += [
-            "*📰 TOP HEADLINES*",
-            f"🕒 Updated: {ist_str}",
-            "",
-        ]
-
-        # Per-section sentiment summary (remove block to disable)
-        lines += build_sentiment_summary(
-            categorized, avg_pct, active_vix,
-            sector_rows=sector_rows,
-            bias_score=bias_score,
-            bias_label=bias_label,
-        )
-
-        # Punchy categorised news with context tags
-        lines += format_news_section(categorized)
 
     # ── Next Session Watchlist ────────────────────────────────────────────────
     lines += build_watchlist(gainers, losers, sector_rows, vol_spikes)
