@@ -367,33 +367,49 @@ def fetch_headlines(url: str, max_items: int = 25) -> list:
 
 MARKET_RELEVANT_KEYWORDS = [
     "stock", "stocks", "share", "shares", "market", "markets", "sensex", "nifty",
-    "nasdaq", "dow", "s&p", "sec ", "ipo", "earnings", "profit", "revenue",
+    "nasdaq", "dow", "s&p", "ipo", "earnings", "profit", "revenue", "loss",
     "results", "quarterly", "q1", "q2", "q3", "q4", "rbi", "fed", "rate",
     "inflation", "gdp", "economy", "fiscal", "budget", "rupee", "dollar",
     "investor", "investors", "trading", "bse", "nse", "wall street", "rally",
     "selloff", "sell-off", "fii", "dii", "mutual fund", "bond", "yield",
     "merger", "acquisition", "stake", "listing", "delisted", "valuation",
-    "tariff", "export", "import", "crude", "gold", "rbi", "bank", "banks",
-    "rbi", "sebi", "fund", "funds", "index", "indices", "futures", "treasury"
+    "tariff", "export", "import", "crude", "oil", "gold", "silver",
+    "bank", "banks", "sebi", "fund", "funds", "index", "indices",
+    "futures", "treasury", "interest rate", "central bank", "equit",
+    "bull", "bear", "correction", "crash", "surge", "plunge", "jump",
+    "rise", "fall", "gain", "decline", "outlook", "forecast", "guidance",
+    "aapl", "msft", "nvda", "amzn", "googl", "meta", "tsla", "jpm",
+    "apple", "microsoft", "nvidia", "amazon", "google", "tesla",
+    "reliance", "tcs", "infosys", "hdfc", "icici", "wipro", "bajaj",
 ]
 
-
 US_ONLY_KEYWORDS = [
-    "us stocks", "u.s. stocks", "wall street", "nasdaq", "dow jones", "dow soars",
-    "dow falls", "s&p 500", "fed ", "federal reserve", "white house",
-    "treasury", "nyse", "spacex", "trump", "biden",
+    "us stocks", "u.s. stocks", "wall street", "nasdaq", "dow jones",
+    "s&p 500", "federal reserve", "white house", "nyse", "sec filing",
 ]
 
 INDIA_ONLY_KEYWORDS = [
-    "sensex", "nifty", "rbi", "rupee", "bse", "nse ", "sebi", "fii", "dii",
-    "india", "indian", "mumbai", "delhi", "crore", "lakh",
+    "sensex", "nifty", "rbi ", "rupee", " bse", "nse ", "sebi", "fii", "dii",
+    "mumbai", "delhi", "crore", "lakh", "mcx",
+]
+
+# Headlines to skip — noise, not actionable for traders
+NOISE_KEYWORDS = [
+    "horoscope", "recipe", "cricket", "ipl", "football", "bollywood",
+    "weather", "obituary", "covid", "vaccine", "travel", "lifestyle",
+    "fashion", "health tip", "movie", "celebrity", "zodiac",
 ]
 
 
 def is_market_relevant(h: str, region: str | None = None) -> bool:
     h_lower = h.lower()
+    # Skip obvious noise
+    if any(kw in h_lower for kw in NOISE_KEYWORDS):
+        return False
+    # Must contain at least one market keyword
     if not any(kw in h_lower for kw in MARKET_RELEVANT_KEYWORDS):
         return False
+    # Region cross-filter (soft — only block clearly wrong-region content)
     if region == "india" and any(kw in h_lower for kw in US_ONLY_KEYWORDS):
         return False
     if region == "us" and any(kw in h_lower for kw in INDIA_ONLY_KEYWORDS):
@@ -401,36 +417,53 @@ def is_market_relevant(h: str, region: str | None = None) -> bool:
     return True
 
 
-def get_headlines(feeds: list, max_total: int = 10, region: str | None = None) -> list:
+def get_headlines(feeds: list, max_total: int = 15, region: str | None = None) -> list:
     seen, result = set(), []
     for feed in feeds:
-        for h in fetch_headlines(feed):
-            if h not in seen and is_market_relevant(h, region) and len(result) < max_total:
-                seen.add(h)
+        for h in fetch_headlines(feed, max_items=40):
+            h_norm = " ".join(h.lower().split())
+            if h_norm not in seen and is_market_relevant(h, region) and len(result) < max_total:
+                seen.add(h_norm)
                 result.append(h)
     return result
 
 
 def categorize_headline(h: str) -> str:
     h_lower = h.lower()
-    if any(w in h_lower for w in ["fed", "rbi", "gdp", "inflation", "rate", "economy", "fiscal", "budget"]):
+    if any(w in h_lower for w in ["fed", "rbi", "gdp", "inflation", "rate hike", "rate cut",
+                                   "fomc", "cpi", "pce", "economy", "fiscal", "budget", "repo",
+                                   "interest rate", "central bank", "yield", "bond", "treasury"]):
         return "Macro"
-    if any(w in h_lower for w in ["earnings", "profit", "revenue", "results", "quarterly", "q1","q2","q3","q4"]):
+    if any(w in h_lower for w in ["earnings", "profit", "revenue", "results", "quarterly",
+                                   "q1", "q2", "q3", "q4", "ebitda", "pat", "beat", "miss",
+                                   "guidance", "outlook", "forecast", "dividend"]):
         return "Earnings"
-    if any(w in h_lower for w in ["ai", "tech", "software", "chip", "openai", "nvidia","cloud","cyber"]):
+    if any(w in h_lower for w in ["ai", "tech", "software", "chip", "openai", "nvidia",
+                                   "cloud", "cyber", "semiconductor", "apple", "microsoft",
+                                   "google", "amazon", "meta ", "tesla", "data center"]):
         return "Tech/AI"
-    if any(w in h_lower for w in ["war", "iran", "china", "sanctions", "geopolit", "conflict", "israel","russia"]):
+    if any(w in h_lower for w in ["war", "iran", "china", "sanctions", "geopolit", "conflict",
+                                   "israel", "russia", "tariff", "trade war", "opec", "oil supply"]):
         return "Geopolitics"
+    if any(w in h_lower for w in ["merger", "acquisition", "takeover", "buyout", "stake sale",
+                                   "deal", "ipo", "listing", "demerger", "buyback"]):
+        return "Corporate"
     return "Market"
 
 
 NSE_FEEDS = [
-    "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
-    "https://www.moneycontrol.com/rss/marketreports.xml",
+    "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",       # ET Markets
+    "https://www.moneycontrol.com/rss/marketreports.xml",                          # Moneycontrol
+    "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms",    # ET Stocks
+    "https://economictimes.indiatimes.com/markets/earnings/rssfeeds/2143429.cms",  # ET Earnings
+    "https://www.business-standard.com/rss/markets-106.rss",                       # Business Standard
 ]
 NYSE_FEEDS = [
-    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=SPY&region=US&lang=en-US",
-    "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+    "https://feeds.reuters.com/reuters/businessNews",                              # Reuters Business
+    "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10001147",  # CNBC Markets
+    "https://feeds.reuters.com/reuters/technologyNews",                            # Reuters Tech
+    "https://feeds.reuters.com/reuters/companyNews",                               # Reuters Company
+    "https://www.investing.com/rss/news_25.rss",                                   # Investing.com US
 ]
 NSE_SPECIALIST_FEEDS = {
     "fii_dii":      [
@@ -1020,6 +1053,7 @@ _CAT_DEFAULT_TAG = {
     "Earnings":    "💰 Earnings",
     "Tech/AI":     "💡 Tech",
     "Geopolitics": "🌍 Geo",
+    "Corporate":   "🤝 Corporate",
     "Market":      "📌 Markets",
 }
 
@@ -1028,6 +1062,7 @@ _CAT_HEADER = {
     "Macro":       "📊 *MACRO*",
     "Earnings":    "💰 *EARNINGS*",
     "Geopolitics": "🌍 *GEOPOLITICS*",
+    "Corporate":   "🤝 *CORPORATE*",
     "Market":      "📈 *MARKET*",
 }
 
@@ -1049,7 +1084,7 @@ def format_news_section(categorized: dict) -> list:
     """
     lines = []
     # Preferred display order
-    order = ["Tech/AI", "Macro", "Market", "Earnings", "Geopolitics"]
+    order = ["Tech/AI", "Macro", "Earnings", "Corporate", "Market", "Geopolitics"]
     sorted_cats = [c for c in order if c in categorized] + \
                   [c for c in categorized if c not in order]
 
